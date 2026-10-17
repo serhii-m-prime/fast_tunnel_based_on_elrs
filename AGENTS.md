@@ -116,3 +116,16 @@ When navigating and modifying the ExpressLRS 4.1 repository, focus on:
 3. **Hardware & Thermal Management Invariants:**
    - Support full `POWER_OUTPUT_VALUES` (`10 mW` to `1000 mW`) on `ES900TX` with automatic fan activation (`>= 250 mW`) and `100 mW` `PA_BOOST` on `ES900RX`.
    - Maintain a fallback recovery method (Wi-Fi WebUI auto-start or UART bootloader entry via `GPIO0`) so neither module can be bricked by experimental RF register configurations.
+
+---
+
+## 7. Implementation Task List
+
+The staged task list is maintained in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+
+- When the user instructs an agent to work from this plan or take tasks from the list, the agent may select and implement pending tasks within the requested scope. The presence of the task list alone is not an instruction to start implementation.
+- If the user does not name a specific task, select the first unchecked task whose dependencies are satisfied, taking the user's current priorities into account. State the selected task IDs before starting work.
+- After implementation and the required verification, change the corresponding checkbox from `- [ ]` to `- [x]` and add an entry to the execution log in `IMPLEMENTATION_PLAN.md` with the task IDs, date, changes, checks, and results.
+- Mark a task complete only when its acceptance requirements are met. Partial or blocked work remains unchecked; record what remains and any blocking condition in the log. Compilation alone does not complete a task requiring hardware measurements.
+- Follow the verification rules in section 6, including builds of both targets, RAM/IRAM checks, and timing calculations when applicable. Distinguish verified firmware behavior from results that still require physical hardware.
+- Keep existing task IDs stable and update dependencies or scope when justified by findings. Follow the user's authorized scope without asking for repeated approval of routine implementation steps.

@@ -14,6 +14,7 @@ ENV_UNIFIED_CONFIG = "ELRS_UNIFIED_CONFIG"
 
 from external import jmespath
 from firmware import TXType
+import elrs_helpers
 
 
 def findFirmwareEnd(f):
@@ -226,7 +227,7 @@ def doConfiguration(file, defines, config, target_name, device_name, rx_as_tx):
         product_name = config['product_name']
         setDefaultProductForTarget(target_name, product_name)
         lua_name = config['lua_name']
-        dir = 'TX' if '_TX' in config['firmware'] else 'RX'
+        dir = 'TX' if elrs_helpers.get_target_type(config.get('firmware', '')) == 'TX' else 'RX'
         layout = f"hardware/{dir}/{config['layout_file']}"
 
     lua_name = lua_name if device_name is None else device_name
@@ -267,7 +268,7 @@ if __name__ == '__main__':
     if config is not None:
         product_name = config['product_name']
         lua_name = config['lua_name']
-        dir = 'TX' if '_TX' in config['firmware'] else 'RX'
+        dir = 'TX' if elrs_helpers.get_target_type(config.get('firmware', '')) == 'TX' else 'RX'
         layout = f"hardware/{dir}/{config['layout_file']}"
 
     appendToFirmware(args.file, product_name, lua_name, args.options, config, layout, None)

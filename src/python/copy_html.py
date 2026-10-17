@@ -1,11 +1,14 @@
 Import("env")
 import os, shutil
+import elrs_helpers
 
 os.chdir('html')
 target_name = env['PIOENV'].upper()
+build_flags = env.get('BUILD_FLAGS', [])
 
-type = 'tx' if '_TX_' in target_name else 'rx'
-is8285 = '-8285' if 'ESP8285' in env['PIOENV'] else ''
-chip = 'sx128x' if '-DRADIO_SX128X=1' in env['BUILD_FLAGS'] else 'sx127x' if '-DRADIO_SX127X=1' in env['BUILD_FLAGS'] else 'lr1121' if '-DRADIO_LR1121=1' in env['BUILD_FLAGS'] else 'lr2021' if '-DRADIO_LR2021=1' in env['BUILD_FLAGS'] else ''
+target_type = elrs_helpers.get_target_type(target_name, build_flags)
+type = 'tx' if target_type == 'TX' else 'rx'
+is8285 = '-8285' if ('ESP8285' in target_name or env.get('PIOPLATFORM', '') == 'espressif8266' or any('PLATFORM_ESP8266' in str(f) for f in build_flags)) else ''
+chip = 'sx128x' if '-DRADIO_SX128X=1' in build_flags else 'sx127x' if '-DRADIO_SX127X=1' in build_flags else 'lr1121' if '-DRADIO_LR1121=1' in build_flags else 'lr2021' if '-DRADIO_LR2021=1' in build_flags else ''
 
 shutil.copy(f'headers/web-{chip}-{type}{is8285}.h', '../include/WebContent.h')

@@ -30,9 +30,11 @@ LIBRARY_EXCLUSIONS = {
 }
 
 
-def get_target_type(target_name):
-    target_parts = target_name.upper().split("_")
-    return next((target for target in ("RX", "TX") if target in target_parts), None)
+import elrs_helpers
+
+
+def get_target_type(target_name, build_flags=()):
+    return elrs_helpers.get_target_type(target_name, build_flags)
 
 
 def get_excluded_libraries(target_type, mcu):
@@ -41,7 +43,7 @@ def get_excluded_libraries(target_type, mcu):
 
 Import("env")
 
-target_type = get_target_type(env["PIOENV"])
+target_type = get_target_type(env["PIOENV"], env.get("BUILD_FLAGS", []))
 excluded_libraries = ()
 if target_type:
     mcu = env.BoardConfig().get("build.mcu", "").lower()

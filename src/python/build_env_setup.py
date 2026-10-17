@@ -26,6 +26,7 @@ platform = env.get('PIOPLATFORM', '')
 stm = platform in ['ststm32']
 
 target_name = env['PIOENV'].upper()
+target_type = elrs_helpers.get_target_type(target_name, env.get('BUILD_FLAGS', []))
 print("PLATFORM : '%s'" % platform)
 print("BUILD ENV: '%s'" % target_name)
 print("build version: %s\n\n" % get_version(env))
@@ -34,7 +35,7 @@ if platform in ['espressif8266']:
     if "_WIFI" in target_name:
         env.Replace(UPLOAD_PROTOCOL="custom")
         env.Replace(UPLOADCMD=upload_via_esp8266_backpack.on_upload)
-    elif "_UART" in target_name:
+    elif "_UART" in target_name or "_BRIDGE" in target_name:
         env.Replace(
             UPLOADER="$PROJECT_DIR/python/external/esptool/esptool.py",
             UPLOAD_SPEED=460800,
@@ -58,7 +59,7 @@ elif platform in ['espressif32']:
     if "_WIFI" in target_name:
         env.Replace(UPLOAD_PROTOCOL="custom")
         env.Replace(UPLOADCMD=upload_via_esp8266_backpack.on_upload)
-    elif "_UART" in target_name:
+    elif "_UART" in target_name or "_BRIDGE" in target_name:
         env.Replace(
             UPLOADER="$PROJECT_DIR/python/external/esptool/esptool.py",
             UPLOAD_SPEED=460800
@@ -85,7 +86,7 @@ elif platform in ['espressif32']:
 
 if "_WIFI" in target_name:
     add_target_uploadoption("uploadconfirm", "Do not upload, just send confirm")
-    if "_TX_" in target_name:
+    if target_type == "TX":
         env.SetDefault(UPLOAD_PORT="elrs_tx.local")
     else:
         env.SetDefault(UPLOAD_PORT="elrs_rx.local")

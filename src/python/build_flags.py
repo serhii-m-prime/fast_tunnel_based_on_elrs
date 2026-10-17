@@ -14,7 +14,8 @@ UIDbytes = ""
 define = ""
 target_name = env.get('PIOENV', '').upper()
 
-isRX = True if '_RX_' in target_name else False
+target_type = elrs_helpers.get_target_type(target_name, build_flags)
+isRX = (target_type == 'RX')
 
 def print_error(error):
     time.sleep(1)
@@ -116,6 +117,28 @@ def condense_flags():
             build_flags = [x.replace(flag,"") for x in build_flags] # remove the removal flag
             build_flags = [x.replace(flag[1:],"") for x in build_flags] # remove the flag if it matches the removal flag
     build_flags = [x for x in build_flags if (x.strip() != "")] # remove any blank items
+    # Keep only the latest single-token -DKEY=VAL or -DRegulatory_Domain_* definition
+    deduped_reversed = []
+    seen_keys = set()
+    seen_exact = set()
+    for item in reversed(build_flags):
+        stripped = item.strip()
+        key = None
+        if " " not in stripped:
+            m_kv = re.match(r"^-D([A-Za-z0-9_]+)=", stripped)
+            if m_kv:
+                key = "KV:" + m_kv.group(1)
+            elif stripped.startswith("-DRegulatory_Domain_"):
+                key = "REG_DOMAIN"
+        if key is not None:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+        if stripped in seen_exact:
+            continue
+        seen_exact.add(stripped)
+        deduped_reversed.append(item)
+    build_flags = list(reversed(deduped_reversed))
 
 def version_to_env():
     ver = elrs_helpers.get_git_version()
@@ -137,6 +160,9 @@ def cleanDefaultProductForTarget(target_name: str) -> None:
 json_flags['flash-discriminator'] = randint(1,2**32-1)
 json_flags['wifi-on-interval'] = -1
 
+for line in build_flags:
+    for token in str(line).split():
+        process_json_flag(token.strip())
 process_flags("user_defines.txt")
 process_flags("super_defines.txt") # allow secret super_defines to override user_defines
 version_to_env()
@@ -144,6 +170,9 @@ build_flags.append("-DLATEST_COMMIT=" + get_git_sha())
 build_flags.append("-DLATEST_VERSION=" + get_version())
 build_flags.append("-DTARGET_NAME=" + re.sub("_VIA_.*", "", target_name))
 condense_flags()
+for line in build_flags:
+    for token in str(line).split():
+        process_json_flag(token.strip())
 
 if '-DRADIO_SX127X=1' in build_flags or '-DRADIO_LR1121=1' in build_flags or '-DRADIO_LR2021=1' in build_flags:
     # disallow setting 2400s for 900
