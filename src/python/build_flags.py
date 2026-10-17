@@ -34,6 +34,8 @@ def dequote(str):
         return str[1:-1]
     return str
 
+BRIDGE_SUPPORTED_BAUDS = (115200, 230400, 420000, 460800)
+
 def process_json_flag(define):
     parts = re.search(r"-D(.*)\s*=\s*(.*)$", define)
     if parts and define.startswith("-D"):
@@ -54,14 +56,20 @@ def process_json_flag(define):
             json_flags['fan-runtime'] = int(dequote(parts.group(2)))
         if parts.group(1) == "RCVR_UART_BAUD" and isRX:
             parts = re.search(r"-D(.*)\s*=\s*\"?([0-9]+).*\"?$", define)
-            json_flags['rcvr-uart-baud'] = int(dequote(parts.group(2)))
+            baud = int(dequote(parts.group(2)))
+            if "_BRIDGE" in target_name and baud not in BRIDGE_SUPPORTED_BAUDS:
+                print_error(f"RCVR_UART_BAUD={baud} is not supported for Bridge targets (allowed: {BRIDGE_SUPPORTED_BAUDS})")
+            json_flags['rcvr-uart-baud'] = baud
         if parts.group(1) == "USE_AIRPORT_AT_BAUD":
             parts = re.search(r"-D(.*)\s*=\s*\"?([0-9]+).*\"?$", define)
+            baud = int(dequote(parts.group(2)))
+            if "_BRIDGE" in target_name and baud not in BRIDGE_SUPPORTED_BAUDS:
+                print_error(f"USE_AIRPORT_AT_BAUD={baud} is not supported for Bridge targets (allowed: {BRIDGE_SUPPORTED_BAUDS})")
             json_flags['is-airport'] = True
             if isRX:
-                json_flags['rcvr-uart-baud'] = int(dequote(parts.group(2)))
+                json_flags['rcvr-uart-baud'] = baud
             else:
-                json_flags['airport-uart-baud'] = int(dequote(parts.group(2)))
+                json_flags['airport-uart-baud'] = baud
     if define == "-DUNLOCK_HIGHER_POWER"  and not isRX:
         json_flags['unlock-higher-power'] = True
     if define == "-DLOCK_ON_FIRST_CONNECTION" and isRX:

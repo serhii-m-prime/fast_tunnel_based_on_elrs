@@ -6,7 +6,7 @@
 
 uint32_t SerialAirPort::sendRCFrame(bool frameAvailable, bool frameMissed, uint32_t *channelData)
 {
-    return DURATION_IMMEDIATELY;
+    return DURATION_NEVER;
 }
 
 int SerialAirPort::getMaxSerialReadSize()

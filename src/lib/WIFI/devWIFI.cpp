@@ -241,6 +241,28 @@ static void UpdateSettings(AsyncWebServerRequest *request, JsonVariant &json)
     return;
   }
 
+  const bool isAirport = json["is-airport"] | firmwareOptions.is_airport;
+  if (isAirport)
+  {
+    const uint32_t requestedBaud =
+#if defined(TARGET_TX)
+        json["airport-uart-baud"] | json["rcvr-uart-baud"] | firmwareOptions.uart_baud;
+#else
+        json["rcvr-uart-baud"] | json["airport-uart-baud"] | firmwareOptions.uart_baud;
+#endif
+    if (!isSupportedBridgeBaud(requestedBaud))
+    {
+      request->send(400, "text/plain", "Unsupported bridge UART baud rate (allowed: 115200, 230400, 420000, 460800).");
+      return;
+    }
+    firmwareOptions.uart_baud = requestedBaud;
+#if defined(TARGET_TX)
+    json["airport-uart-baud"] = requestedBaud;
+#else
+    json["rcvr-uart-baud"] = requestedBaud;
+#endif
+  }
+
   File file = LittleFS.open("/options.json", "w");
   serializeJson(json, file);
   file.close();

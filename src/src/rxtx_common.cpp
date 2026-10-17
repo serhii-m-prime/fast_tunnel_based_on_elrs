@@ -51,6 +51,13 @@ static void setupWire()
         }
     }
 #endif
+    if (firmwareOptions.is_airport &&
+        (gpio_sda == U0RXD_GPIO_NUM || gpio_sda == U0TXD_GPIO_NUM ||
+         gpio_scl == U0RXD_GPIO_NUM || gpio_scl == U0TXD_GPIO_NUM))
+    {
+        gpio_sda = UNDEF_PIN;
+        gpio_scl = UNDEF_PIN;
+    }
     if(gpio_sda != UNDEF_PIN && gpio_scl != UNDEF_PIN)
     {
         DBGLN("Starting wire on SCL %d, SDA %d", gpio_scl, gpio_sda);

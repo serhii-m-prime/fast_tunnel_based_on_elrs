@@ -16,6 +16,8 @@
 #include "devButton.h"
 #include "devVTX.h"
 #if defined(PLATFORM_ESP32)
+#include <driver/uart.h>
+#include <esp_log.h>
 #include "devBLE.h"
 #include "devBackpack.h"
 #if !defined(PLATFORM_ESP32_C3)
@@ -41,12 +43,14 @@ void sendMAVLinkTelemetryToBackpack(uint8_t *) {}
 
 #if defined(PLATFORM_ESP8266)
 #include <user_interface.h>
+#include <uart.h>
 #endif
 
 /// define some libs to use ///
 MSP msp;
 TxConfig config;
-Stream *TxUSB;
+static NullStream nullStream;
+Stream *TxUSB = &nullStream;
 
 // Variables / constants for Airport //
 FIFO<AP_MAX_BUF_LEN> apInputBuffer;
@@ -736,10 +740,18 @@ static void UARTconnected()
   config.SetRate(index);
   if (connectionState == noCrossfire || connectionState < MODE_STATES)
   {
-    // When CRSF first connects, always go into a brief delay before
-    // starting to transmit, to make sure a ModelID update isn't coming
-    // right behind it
-    setConnectionState(awaitingModelId);
+    if (firmwareOptions.is_airport)
+    {
+      // AirPort mode has no CRSF handset sending a ModelID update
+      setConnectionState(disconnected);
+    }
+    else
+    {
+      // When CRSF first connects, always go into a brief delay before
+      // starting to transmit, to make sure a ModelID update isn't coming
+      // right behind it
+      setConnectionState(awaitingModelId);
+    }
   }
   // But start the timer to get OpenTX sync going and a ModelID update sent
   hwTimer::resume();
@@ -1092,12 +1104,21 @@ static void HandleUARTin()
 {
   if (firmwareOptions.is_airport)
   {
+    if (connectionState != connected)
+    {
+      // Discard any bytes received before the RF link is established
+      uint8_t discardBuf[64];
+      while (TxUSB->available() > 0)
+      {
+        TxUSB->readBytes(discardBuf, std::min((int)sizeof(discardBuf), TxUSB->available()));
+      }
+      return;
+    }
     auto size = std::min(apInputBuffer.free(), (uint16_t)TxUSB->available());
     if (size > 0)
     {
       uint8_t buf[size];
       size = TxUSB->readBytes(buf, size);
-      if (connectionState != connected) feedUSB(buf, size);
       apInputBuffer.lock();
       apInputBuffer.pushBytes(buf, size);
       apInputBuffer.unlock();
@@ -1198,15 +1219,29 @@ static void setupSerial()
    * Setup the logging/backpack serial port, and the USB serial port.
    * This is always done because we need a place to send data even if there is no backpack!
    */
+  if (firmwareOptions.is_airport)
+  {
+    firmwareOptions.uart_baud = normalizeBridgeBaud(firmwareOptions.uart_baud);
+  }
 
 // Setup BackpackOrLogStrm
 #if defined(PLATFORM_ESP32)
   Stream *serialPort;
 
-  if(firmwareOptions.is_airport)
+  if (firmwareOptions.is_airport)
   {
-    serialPort = new HardwareSerial(1);
-    ((HardwareSerial *)serialPort)->begin(firmwareOptions.uart_baud, SERIAL_8N1, U0RXD_GPIO_NUM, U0TXD_GPIO_NUM);
+    esp_log_level_set("*", ESP_LOG_NONE);
+    if (GPIO_PIN_DEBUG_RX != UNDEF_PIN && GPIO_PIN_DEBUG_TX != UNDEF_PIN &&
+        GPIO_PIN_DEBUG_RX != U0RXD_GPIO_NUM && GPIO_PIN_DEBUG_RX != U0TXD_GPIO_NUM &&
+        GPIO_PIN_DEBUG_TX != U0RXD_GPIO_NUM && GPIO_PIN_DEBUG_TX != U0TXD_GPIO_NUM)
+    {
+      serialPort = new HardwareSerial(1);
+      ((HardwareSerial *)serialPort)->begin(BACKPACK_LOGGING_BAUD, SERIAL_8N1, GPIO_PIN_DEBUG_RX, GPIO_PIN_DEBUG_TX);
+    }
+    else
+    {
+      serialPort = &nullStream;
+    }
   }
   else if (GPIO_PIN_DEBUG_RX != UNDEF_PIN && GPIO_PIN_DEBUG_TX != UNDEF_PIN)
   {
@@ -1215,18 +1250,18 @@ static void setupSerial()
   }
   else
   {
-    serialPort = new NullStream();
+    serialPort = &nullStream;
   }
 #elif defined(PLATFORM_ESP8266)
   Stream *serialPort;
-  if (GPIO_PIN_DEBUG_TX != UNDEF_PIN)
+  if (!firmwareOptions.is_airport && GPIO_PIN_DEBUG_TX != UNDEF_PIN)
   {
     serialPort = new HardwareSerial(1);
     ((HardwareSerial*)serialPort)->begin(BACKPACK_LOGGING_BAUD, SERIAL_8N1, SERIAL_TX_ONLY, GPIO_PIN_DEBUG_TX);
   }
   else
   {
-    serialPort = new NullStream();
+    serialPort = &nullStream;
   }
 #endif
   BackpackOrLogStrm = serialPort;
@@ -1237,9 +1272,22 @@ static void setupSerial()
   USBSerial.begin(firmwareOptions.uart_baud);
   TxUSB = &USBSerial;
 #elif defined(PLATFORM_ESP32) && !defined(PLATFORM_ESP32_C3)
-  if (GPIO_PIN_DEBUG_RX == U0RXD_GPIO_NUM && GPIO_PIN_DEBUG_TX == U0TXD_GPIO_NUM)
+  if (firmwareOptions.is_airport)
   {
-    // The backpack or Airport is already assigned on UART0 (pins 3, 1)
+    // Dedicate hardware UART0 (Serial) on GPIO3 (RX) / GPIO1 (TX) in 8N1 non-inverted mode
+    uart_set_line_inverse(0, UART_SIGNAL_INV_DISABLE);
+    Serial.begin(firmwareOptions.uart_baud, SERIAL_8N1, U0RXD_GPIO_NUM, U0TXD_GPIO_NUM, false);
+    Serial.setDebugOutput(false);
+    Serial.setTimeout(0);
+    while (Serial.available() > 0)
+    {
+      Serial.read();
+    }
+    TxUSB = &Serial;
+  }
+  else if (GPIO_PIN_DEBUG_RX == U0RXD_GPIO_NUM && GPIO_PIN_DEBUG_TX == U0TXD_GPIO_NUM)
+  {
+    // The backpack is already assigned on UART0 pins (3, 1)
     // This is also USB on modules that use DIPs
     // Set TxUSB to BackpackOrLogStrm so that data goes to the same place
     TxUSB = BackpackOrLogStrm;
@@ -1247,7 +1295,7 @@ static void setupSerial()
   else if (GPIO_PIN_RCSIGNAL_RX == U0RXD_GPIO_NUM && GPIO_PIN_RCSIGNAL_TX == U0TXD_GPIO_NUM)
   {
     // This is an internal module, or an external module configured with a relay.  Do not setup TxUSB.
-    TxUSB = new NullStream();
+    TxUSB = &nullStream;
   }
   else
   {
@@ -1263,15 +1311,23 @@ static void setupSerial()
   // zero bytes on an ESP8266 TX target.
   if (firmwareOptions.is_airport)
   {
-    Serial.begin(firmwareOptions.uart_baud);
+    uart_set_debug(UART_NO);
+    system_set_os_print(0);
+    Serial.begin(firmwareOptions.uart_baud, SERIAL_8N1, SERIAL_FULL, 1, false);
+    Serial.setDebugOutput(false);
+    Serial.setTimeout(0);
+    while (Serial.available() > 0)
+    {
+      Serial.read();
+    }
     TxUSB = &Serial;
   }
   else
   {
-    TxUSB = new NullStream();
+    TxUSB = &nullStream;
   }
 #else
-  TxUSB = new NullStream();
+  TxUSB = &nullStream;
 #endif
 }
 
@@ -1410,6 +1466,12 @@ void setup()
     }
 
     config.Load(); // Load the stored values from eeprom
+    if (firmwareOptions.is_airport)
+    {
+      config.SetLinkMode(TX_NORMAL_MODE);
+      config.SetTlm(TLM_RATIO_1_2); // Force TLM ratio of 1:2 for balanced bi-dir link
+      config.SetMotionMode(0); // Ensure motion detection is off
+    }
 
     Radio.currFreq = FHSSgetInitialFreq(); //set frequency first or an error will occur!!!
     #if defined(RADIO_SX127X)
@@ -1462,7 +1524,7 @@ void setup()
   {
     // In the failure case we set the logging to the null logger so nothing crashes
     // if it decides to log something
-    BackpackOrLogStrm = new NullStream();
+    BackpackOrLogStrm = &nullStream;
     TxUSB = BackpackOrLogStrm;
   }
 
@@ -1471,10 +1533,15 @@ void setup()
 
   devicesStart();
 
-  if (firmwareOptions.is_airport)
+  if (firmwareOptions.is_airport && connectionState < FAILURE_STATES)
   {
-    config.SetTlm(TLM_RATIO_1_2); // Force TLM ratio of 1:2 for balanced bi-dir link
-    config.SetMotionMode(0); // Ensure motion detection is off
+    apInputBuffer.flush();
+    apOutputBuffer.flush();
+    uartInputBuffer.flush();
+    while (TxUSB->available() > 0)
+    {
+      TxUSB->read();
+    }
     UARTconnected();
   }
 }
@@ -1516,10 +1583,10 @@ void loop()
   CheckReadyToSend();
   CheckConfigChangePending();
   DynamicPower_Update(now);
-  VtxPitmodeSwitchUpdate();
 
   if (!firmwareOptions.is_airport)
   {
+    VtxPitmodeSwitchUpdate();
     checkSendLinkStatsToHandset(now);
     if (DataDlReceiver.HasFinishedData())
     {

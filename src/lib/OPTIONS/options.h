@@ -52,6 +52,31 @@ constexpr size_t ELRSOPTS_DEVICENAME_SIZE = 16;
 constexpr size_t ELRSOPTS_OPTIONS_SIZE = 512;
 constexpr size_t ELRSOPTS_HARDWARE_SIZE = 2048;
 
+constexpr uint32_t BRIDGE_UART_BAUD_DEFAULT = 460800U;
+constexpr uint32_t BRIDGE_SUPPORTED_BAUDS[] = {
+    115200U,
+    230400U,
+    420000U,
+    460800U,
+};
+
+inline bool isSupportedBridgeBaud(uint32_t baud)
+{
+    for (size_t i = 0; i < sizeof(BRIDGE_SUPPORTED_BAUDS) / sizeof(BRIDGE_SUPPORTED_BAUDS[0]); ++i)
+    {
+        if (BRIDGE_SUPPORTED_BAUDS[i] == baud)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline uint32_t normalizeBridgeBaud(uint32_t baud)
+{
+    return isSupportedBridgeBaud(baud) ? baud : BRIDGE_UART_BAUD_DEFAULT;
+}
+
 extern char device_name[];
 extern firmware_options_t firmwareOptions;
 extern bool options_init();

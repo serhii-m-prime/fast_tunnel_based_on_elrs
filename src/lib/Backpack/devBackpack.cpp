@@ -133,7 +133,7 @@ static int debouncedRead(int pin)
 
 void checkBackpackUpdate()
 {
-    if (OPT_USE_TX_BACKPACK)
+    if (OPT_USE_TX_BACKPACK && !firmwareOptions.is_airport)
     {
         if (GPIO_PIN_BACKPACK_EN != UNDEF_PIN && debouncedRead(GPIO_PIN_BOOT0) == 0)
         {
@@ -144,6 +144,10 @@ void checkBackpackUpdate()
 
 void feedUSB(const uint8_t *buf, const uint16_t size)
 {
+    if (firmwareOptions.is_airport)
+    {
+        return;
+    }
 #if defined(PLATFORM_ESP32_S3)
     // Start passthrough mode if an Espressif resync packet is detected on the USB port
     static const uint8_t resync[] = {
@@ -355,7 +359,7 @@ static void BackpackPollAuxStates()
 
 void sendCRSFTelemetryToBackpack(const uint8_t *data)
 {
-    if (config.GetBackpackDisable() || config.GetBackpackTlmMode() == BACKPACK_TELEM_MODE_OFF || config.GetLinkMode() == TX_MAVLINK_MODE)
+    if (!OPT_USE_TX_BACKPACK || firmwareOptions.is_airport || config.GetBackpackDisable() || config.GetBackpackTlmMode() == BACKPACK_TELEM_MODE_OFF || config.GetLinkMode() == TX_MAVLINK_MODE)
     {
         return;
     }
@@ -382,7 +386,7 @@ void sendCRSFTelemetryToBackpack(const uint8_t *data)
 
 void sendMAVLinkTelemetryToBackpack(const uint8_t *data)
 {
-    if (config.GetBackpackDisable() || config.GetBackpackTlmMode() == BACKPACK_TELEM_MODE_OFF)
+    if (!OPT_USE_TX_BACKPACK || firmwareOptions.is_airport || config.GetBackpackDisable() || config.GetBackpackTlmMode() == BACKPACK_TELEM_MODE_OFF)
     {
         // Backpack telemetry is off
         return;

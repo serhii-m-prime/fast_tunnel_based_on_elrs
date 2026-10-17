@@ -183,20 +183,28 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
     firmwareOptions.fan_min_runtime = doc["fan-runtime"] | 30U;
     firmwareOptions.unlock_higher_power = doc["unlock-higher-power"] | false;
     #if defined(USE_AIRPORT_AT_BAUD)
-    firmwareOptions.uart_baud = doc["airport-uart-baud"] | USE_AIRPORT_AT_BAUD;
+    firmwareOptions.uart_baud = doc["airport-uart-baud"] | doc["rcvr-uart-baud"] | USE_AIRPORT_AT_BAUD;
     firmwareOptions.is_airport = doc["is-airport"] | true;
     #else
-    firmwareOptions.uart_baud = doc["airport-uart-baud"] | 460800;
+    firmwareOptions.uart_baud = doc["airport-uart-baud"] | BRIDGE_UART_BAUD_DEFAULT;
     firmwareOptions.is_airport = doc["is-airport"] | false;
     #endif
+    if (firmwareOptions.is_airport)
+    {
+        firmwareOptions.uart_baud = normalizeBridgeBaud(firmwareOptions.uart_baud);
+    }
     #else
     #if defined(USE_AIRPORT_AT_BAUD)
-    firmwareOptions.uart_baud = doc["rcvr-uart-baud"] | USE_AIRPORT_AT_BAUD;
+    firmwareOptions.uart_baud = doc["rcvr-uart-baud"] | doc["airport-uart-baud"] | USE_AIRPORT_AT_BAUD;
     firmwareOptions.is_airport = doc["is-airport"] | true;
     #else
     firmwareOptions.uart_baud = doc["rcvr-uart-baud"] | 420000;
     firmwareOptions.is_airport = doc["is-airport"] | false;
     #endif
+    if (firmwareOptions.is_airport)
+    {
+        firmwareOptions.uart_baud = normalizeBridgeBaud(firmwareOptions.uart_baud);
+    }
     firmwareOptions.lock_on_first_connection = doc["lock-on-first-connection"] | true;
     firmwareOptions.dji_permanently_armed = doc["dji-permanently-armed"] | false;
     #endif

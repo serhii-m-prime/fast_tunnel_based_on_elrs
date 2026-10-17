@@ -1,6 +1,12 @@
 #include "TXModuleEndpoint.h"
 #include "common.h"
 #include "device.h"
+#include "options.h"
+
+static bool initialize()
+{
+  return !firmwareOptions.is_airport;
+}
 
 static int event()
 {
@@ -21,7 +27,7 @@ static int start()
 }
 
 device_t TXLUA_device = {
-  .initialize = nullptr,
+  .initialize = initialize,
   .start = start,
   .event = event,
   .timeout = nullptr,

@@ -43,7 +43,9 @@
 #include <LittleFS.h>
 #if defined(PLATFORM_ESP8266)
 #include <user_interface.h>
+#include <uart.h>
 #elif defined(PLATFORM_ESP32)
+#include <esp_log.h>
 #include "devSerialUpdate.h"
 #include "devVTXSPI.h"
 #include "devMSPVTX.h"
@@ -942,7 +944,10 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
 {
     if (firmwareOptions.is_airport)
     {
-        OtaUnpackAirportData(otaPktPtr, &((SerialAirPort *)serialIO)->apOutputBuffer);
+        if (connectionState == connected)
+        {
+            OtaUnpackAirportData(otaPktPtr, &((SerialAirPort *)serialIO)->apOutputBuffer);
+        }
         return;
     }
 
@@ -1046,21 +1051,24 @@ static bool ICACHE_RAM_ATTR ProcessRfPacket_SYNC(uint32_t const now, OTA_Sync_s 
     DBGW('s');
 #endif
 
-    if (otaSync->otaProtocol == TX_MAVLINK_MODE)
+    if (!firmwareOptions.is_airport)
     {
-        config.SetSerialProtocol(PROTOCOL_MAVLINK);
-    }
-    else if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
-    {
-        config.SetSerialProtocol(PROTOCOL_CRSF);
-    }
+        if (otaSync->otaProtocol == TX_MAVLINK_MODE)
+        {
+            config.SetSerialProtocol(PROTOCOL_MAVLINK);
+        }
+        else if (config.GetSerialProtocol() == PROTOCOL_MAVLINK)
+        {
+            config.SetSerialProtocol(PROTOCOL_CRSF);
+        }
 
-    // Check if otaProtocol has been updated.
-    if (config.IsModified())
-    {
-        deferExecutionMillis(100, [](){
-            reconfigureSerial();
-        });
+        // Check if otaProtocol has been updated.
+        if (config.IsModified())
+        {
+            deferExecutionMillis(100, [](){
+                reconfigureSerial();
+            });
+        }
     }
 
     if (isDualRadio())
@@ -1240,8 +1248,16 @@ void ICACHE_RAM_ATTR TXdoneISR()
 /**
  * Process the assembled uplink data packet in DataUlBuffer[]
  **/
+static NullStream nullStream;
+
 void DataUlReceiveComplete()
 {
+    if (firmwareOptions.is_airport)
+    {
+        DataUlReceiver.Unlock();
+        return;
+    }
+
     switch (DataUlBuffer[0])
     {
     case MSP_ELRS_SET_RX_WIFI_MODE: //0x0E
@@ -1270,6 +1286,41 @@ void DataUlReceiveComplete()
 
 static void setupSerial()
 {
+    if (firmwareOptions.is_airport)
+    {
+        serialBaud = normalizeBridgeBaud(firmwareOptions.uart_baud);
+        firmwareOptions.uart_baud = serialBaud;
+#if defined(PLATFORM_ESP8266)
+        uart_set_debug(UART_NO);
+        system_set_os_print(0);
+        Serial.begin(serialBaud, SERIAL_8N1, SERIAL_FULL, 1, false);
+        Serial.setDebugOutput(false);
+        Serial.setTimeout(0);
+#elif defined(PLATFORM_ESP32)
+        esp_log_level_set("*", ESP_LOG_NONE);
+        #if defined(ARDUINO_CORE_INVERT_FIX)
+        uart_set_line_inverse(0, UART_SIGNAL_INV_DISABLE);
+        #endif
+        const int8_t rxPin = (GPIO_PIN_RCSIGNAL_RX == UNDEF_PIN) ? U0RXD_GPIO_NUM : GPIO_PIN_RCSIGNAL_RX;
+        const int8_t txPin = (GPIO_PIN_RCSIGNAL_TX == UNDEF_PIN) ? U0TXD_GPIO_NUM : GPIO_PIN_RCSIGNAL_TX;
+        Serial.begin(serialBaud, SERIAL_8N1, rxPin, txPin, false);
+        Serial.setDebugOutput(false);
+        Serial.setTimeout(0);
+#endif
+        while (Serial.available() > 0)
+        {
+            Serial.read();
+        }
+        BackpackOrLogStrm = &nullStream;
+        if (serialIO == nullptr)
+        {
+            serialIO = new SerialAirPort(SERIAL_PROTOCOL_TX, SERIAL_PROTOCOL_RX);
+        }
+        ((SerialAirPort *)serialIO)->apInputBuffer.flush();
+        ((SerialAirPort *)serialIO)->apOutputBuffer.flush();
+        return;
+    }
+
     bool sbusSerialOutput = false;
 	bool sumdSerialOutput = false;
     bool mavlinkSerialOutput = false;
@@ -1288,12 +1339,12 @@ static void setupSerial()
         BackpackOrLogStrm = &Serial;
         #endif
         #else
-        BackpackOrLogStrm = new NullStream();
+        BackpackOrLogStrm = &nullStream;
         #endif
         serialIO = new SerialNOOP();
         return;
     }
-    if (config.GetSerialProtocol() == PROTOCOL_CRSF || config.GetSerialProtocol() == PROTOCOL_INVERTED_CRSF || firmwareOptions.is_airport)
+    if (config.GetSerialProtocol() == PROTOCOL_CRSF || config.GetSerialProtocol() == PROTOCOL_INVERTED_CRSF)
     {
         serialBaud = firmwareOptions.uart_baud;
     }
@@ -1416,7 +1467,7 @@ static void setupSerial()
     BackpackOrLogStrm = &Serial;
 #endif
 #else
-    BackpackOrLogStrm = new NullStream();
+    BackpackOrLogStrm = &nullStream;
 #endif
 }
 
@@ -1527,7 +1578,7 @@ void reconfigureSerial1()
 
 static void serialShutdown()
 {
-    BackpackOrLogStrm = new NullStream();
+    BackpackOrLogStrm = &nullStream;
     if(serialIO != nullptr)
     {
         Serial.end();
@@ -1538,6 +1589,10 @@ static void serialShutdown()
 
 void reconfigureSerial()
 {
+    if (firmwareOptions.is_airport && serialIO != nullptr)
+    {
+        return;
+    }
     serialShutdown();
     setupSerial();
 }
@@ -1882,7 +1937,7 @@ static void checkSendLinkStatsToFc(uint32_t now)
 static void debugRcvrLinkstats()
 {
 #if defined(DEBUG_RCVR_LINKSTATS)
-    if (debugRcvrLinkstatsPending)
+    if (debugRcvrLinkstatsPending && !firmwareOptions.is_airport)
     {
         debugRcvrLinkstatsPending = false;
 
@@ -2010,7 +2065,7 @@ void setup()
     {
         // In the failure case we set the logging to the null logger so nothing crashes
         // if it decides to log something
-        BackpackOrLogStrm = new NullStream();
+        BackpackOrLogStrm = &nullStream;
 
         // Register the WiFi with the framework
         static device_affinity_t wifi_device[] = {
@@ -2029,6 +2084,16 @@ void setup()
         // Calling end() here, will call _uartDetachPins() on the underlying UART implementation so they won't
         // be saved later (fixed upstream, coming someday)
         Serial.end();
+        if (firmwareOptions.is_airport)
+        {
+            esp_log_level_set("*", ESP_LOG_NONE);
+        }
+#elif defined(PLATFORM_ESP8266)
+        if (firmwareOptions.is_airport)
+        {
+            uart_set_debug(UART_NO);
+            system_set_os_print(0);
+        }
 #endif
 
         // default to CRSF protocol and the compiled baud rate
@@ -2037,17 +2102,24 @@ void setup()
         // pre-initialise serial must be done before anything as some libs write
         // to the serial port and they'll block if the buffer fills
         #if defined(DEBUG_LOG)
-        Serial.begin(serialBaud);
-        BackpackOrLogStrm = &Serial;
+        if (!firmwareOptions.is_airport)
+        {
+            Serial.begin(serialBaud);
+            BackpackOrLogStrm = &Serial;
+        }
+        else
+        {
+            BackpackOrLogStrm = &nullStream;
+        }
         #else
-        BackpackOrLogStrm = new NullStream();
+        BackpackOrLogStrm = &nullStream;
         #endif
 
         // Init EEPROM and load config, checking powerup count
         setupConfigAndPocCheck();
         setupTarget();
         // If serial is not already defined, then see if there is serial pin configured in the PWM configuration
-        if (OPT_HAS_SERVO_OUTPUT && GPIO_PIN_RCSIGNAL_RX == UNDEF_PIN && GPIO_PIN_RCSIGNAL_TX == UNDEF_PIN)
+        if (!firmwareOptions.is_airport && OPT_HAS_SERVO_OUTPUT && GPIO_PIN_RCSIGNAL_RX == UNDEF_PIN && GPIO_PIN_RCSIGNAL_TX == UNDEF_PIN)
         {
             for (int i = 0 ; i < GPIO_PIN_PWM_OUTPUTS_COUNT ; i++)
             {
@@ -2059,10 +2131,16 @@ void setup()
                 }
             }
         }
-        crsfRouter.addEndpoint(&crsfReceiver);
-        crsfRouter.addConnector(&otaConnector);
+        if (!firmwareOptions.is_airport)
+        {
+            crsfRouter.addEndpoint(&crsfReceiver);
+            crsfRouter.addConnector(&otaConnector);
+        }
         setupSerial();
-        setupSerial1();
+        if (!firmwareOptions.is_airport)
+        {
+            setupSerial1();
+        }
 
         devicesRegister(ui_devices, ARRAY_SIZE(ui_devices));
         devicesInit();
@@ -2072,6 +2150,14 @@ void setup()
         FHSSrandomiseFHSSsequence(OtaGetUidSeed());
 
         setupRadio();
+
+        if (firmwareOptions.is_airport)
+        {
+            while (Serial.available() > 0)
+            {
+                Serial.read();
+            }
+        }
 
         if (connectionState != radioFailed)
         {
@@ -2102,7 +2188,7 @@ void loop()
 {
     unsigned long now = millis();
 
-    if (DataUlReceiver.HasFinishedData())
+    if (!firmwareOptions.is_airport && DataUlReceiver.HasFinishedData())
     {
         DataUlReceiveComplete();
     }
@@ -2151,7 +2237,10 @@ void loop()
         GotConnection(now);
     }
 
-    checkSendLinkStatsToFc(now);
+    if (!firmwareOptions.is_airport)
+    {
+        checkSendLinkStatsToFc(now);
+    }
 
     if ((RXtimerState == tim_tentative) && ((now - GotConnectionMillis) > ConsiderConnGoodMillis) && (abs(LPF_OffsetDx.value()) <= 5))
     {
@@ -2159,15 +2248,18 @@ void loop()
         DBGLN("Timer locked");
     }
 
-    uint8_t nextPlayloadSize = 0;
-    if (!DataDlSender.IsActive() && otaConnector.GetNextPayload(&nextPlayloadSize, DataDlBuffer))
+    if (!firmwareOptions.is_airport)
     {
-        DataDlSender.SetDataToTransmit(DataDlBuffer, nextPlayloadSize);
-    }
+        uint8_t nextPlayloadSize = 0;
+        if (!DataDlSender.IsActive() && otaConnector.GetNextPayload(&nextPlayloadSize, DataDlBuffer))
+        {
+            DataDlSender.SetDataToTransmit(DataDlBuffer, nextPlayloadSize);
+        }
 
-    if (config.GetSerialProtocol() == PROTOCOL_MAVLINK && !DataDlSender.IsActive() && ((SerialMavlink *)serialIO)->GetNextPayload(&nextPlayloadSize, DataDlBuffer))
-    {
-        DataDlSender.SetDataToTransmit(DataDlBuffer, nextPlayloadSize);
+        if (config.GetSerialProtocol() == PROTOCOL_MAVLINK && !DataDlSender.IsActive() && ((SerialMavlink *)serialIO)->GetNextPayload(&nextPlayloadSize, DataDlBuffer))
+        {
+            DataDlSender.SetDataToTransmit(DataDlBuffer, nextPlayloadSize);
+        }
     }
 
     updateTelemetryBurst();

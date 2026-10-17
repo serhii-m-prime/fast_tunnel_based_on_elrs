@@ -11,7 +11,9 @@
 #if defined(UNIT_TEST)
 Stream *BackpackOrLogStrm = &Serial;
 #else
-Stream *BackpackOrLogStrm;
+#include "helpers.h"
+static NullStream nullLogStream;
+Stream *BackpackOrLogStrm = &nullLogStream;
 #endif
 
 void debugPrintf(const char* fmt, ...)
@@ -99,7 +101,9 @@ void hexdump(const void *p, size_t len)
 // Create a UART to send DBGLN to during preinit
 void debugCreateInitLogger()
 {
-  #if defined(PLATFORM_ESP32)
+  #if defined(USE_AIRPORT_AT_BAUD)
+  BackpackOrLogStrm = &nullLogStream;
+  #elif defined(PLATFORM_ESP32)
   BackpackOrLogStrm = new HardwareSerial(1);
   ((HardwareSerial *)BackpackOrLogStrm)->begin(460800, SERIAL_8N1, 3, 1);
   #else
@@ -110,8 +114,10 @@ void debugCreateInitLogger()
 
 void debugFreeInitLogger()
 {
+  #if !defined(USE_AIRPORT_AT_BAUD)
   ((HardwareSerial *)BackpackOrLogStrm)->end();
   delete (HardwareSerial *)BackpackOrLogStrm;
-  BackpackOrLogStrm = nullptr;
+  #endif
+  BackpackOrLogStrm = &nullLogStream;
 }
 #endif

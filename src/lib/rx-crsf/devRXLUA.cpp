@@ -1,7 +1,13 @@
 #include "RXEndpoint.h"
 #include "device.h"
+#include "options.h"
 
 extern RXEndpoint crsfReceiver;
+
+static bool initialize()
+{
+    return !firmwareOptions.is_airport;
+}
 
 static int event()
 {
@@ -17,7 +23,7 @@ static int start()
 }
 
 device_t RXLUA_device = {
-  .initialize = nullptr,
+  .initialize = initialize,
   .start = start,
   .event = event,
   .timeout = nullptr,
