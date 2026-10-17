@@ -696,6 +696,116 @@ void test_decodingHybridWide_AUXX_low()
         test_decodingHybridWide(i, 0, CRSF_CHANNEL_VALUE_1000);
 }
 
+void test_eml_header_vectors()
+{
+    uint8_t wire[EML_HEADER_SIZE] = {0, 0};
+    EmlHeader_s dec = {};
+
+    // Vector 1: DATA, seq=0, ack=7, flow=NORMAL, len=60 -> 0xE1, 0x3C
+    const EmlHeader_s v1 = {EML_PKT_TYPE_DATA, 0, 7, 60, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderEncode(&v1, wire, EML_MAX_PAYLOAD_LEN_64));
+    TEST_ASSERT_EQUAL_HEX8(0xE1, wire[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x3C, wire[1]);
+    TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderDecode(wire, &dec, EML_MAX_PAYLOAD_LEN_64));
+    TEST_ASSERT_EQUAL_UINT8(EML_PKT_TYPE_DATA, dec.pkt_type);
+    TEST_ASSERT_EQUAL_UINT8(0, dec.seq_num);
+    TEST_ASSERT_EQUAL_UINT8(7, dec.ack_num);
+    TEST_ASSERT_EQUAL_UINT8(60, dec.payload_len);
+    TEST_ASSERT_EQUAL_UINT8(EML_FLOW_CTRL_NORMAL, dec.flow_ctrl);
+
+    // Vector 2: DATA (32B frame), seq=3, ack=2, flow=HIGH_WATER, len=28 -> 0x4D, 0x5C
+    const EmlHeader_s v2 = {EML_PKT_TYPE_DATA, 3, 2, 28, EML_FLOW_CTRL_HIGH_WATER};
+    TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderEncode(&v2, wire, EML_MAX_PAYLOAD_LEN_32));
+    TEST_ASSERT_EQUAL_HEX8(0x4D, wire[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x5C, wire[1]);
+
+    // Vector 3: KEEPALIVE, seq=5, ack=5, flow=PAUSE, len=0 -> 0xB6, 0xC0
+    const EmlHeader_s v3 = {EML_PKT_TYPE_KEEPALIVE, 5, 5, 0, EML_FLOW_CTRL_PAUSE};
+    TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderEncode(&v3, wire, EML_MAX_PAYLOAD_LEN_64));
+    TEST_ASSERT_EQUAL_HEX8(0xB6, wire[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xC0, wire[1]);
+
+    // Vector 4: SYNC, seq=7, ack=7, flow=NORMAL, len=12 -> 0xFC, 0x0C
+    const EmlHeader_s v4 = {EML_PKT_TYPE_SYNC, 7, 7, 12, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderEncode(&v4, wire, EML_MAX_PAYLOAD_LEN_64));
+    TEST_ASSERT_EQUAL_HEX8(0xFC, wire[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x0C, wire[1]);
+}
+
+void test_eml_header_exhaustive_roundtrip()
+{
+    uint32_t valid64 = 0;
+    uint32_t valid32 = 0;
+    for (uint32_t w = 0; w < 65536U; ++w)
+    {
+        const uint8_t in[EML_HEADER_SIZE] = {
+            (uint8_t)(w & 0xFFU),
+            (uint8_t)((w >> 8U) & 0xFFU)
+        };
+        EmlHeader_s dec = {};
+        if (emlHeaderDecode(in, &dec, EML_MAX_PAYLOAD_LEN_64) == EML_HDR_OK)
+        {
+            ++valid64;
+            uint8_t re[EML_HEADER_SIZE] = {0, 0};
+            TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderEncode(&dec, re, EML_MAX_PAYLOAD_LEN_64));
+            TEST_ASSERT_EQUAL_HEX8(in[0], re[0]);
+            TEST_ASSERT_EQUAL_HEX8(in[1], re[1]);
+        }
+        if (emlHeaderDecode(in, &dec, EML_MAX_PAYLOAD_LEN_32) == EML_HDR_OK)
+        {
+            ++valid32;
+            uint8_t re[EML_HEADER_SIZE] = {0, 0};
+            TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderEncode(&dec, re, EML_MAX_PAYLOAD_LEN_32));
+            TEST_ASSERT_EQUAL_HEX8(in[0], re[0]);
+            TEST_ASSERT_EQUAL_HEX8(in[1], re[1]);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(30976U, valid64);
+    TEST_ASSERT_EQUAL_UINT32(14592U, valid32);
+}
+
+void test_eml_header_validation_errors()
+{
+    EmlHeader_s h = {EML_PKT_TYPE_DATA, 0, 0, 1, EML_FLOW_CTRL_NORMAL};
+    uint8_t out[EML_HEADER_SIZE] = {0, 0};
+
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_NULL_PTR, emlHeaderValidate(nullptr));
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_NULL_PTR, emlHeaderEncode(&h, nullptr));
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_NULL_PTR, emlHeaderEncode(nullptr, out));
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_NULL_PTR, emlHeaderDecode(nullptr, &h));
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_NULL_PTR, emlHeaderDecode(out, nullptr));
+
+    h = {EML_PKT_TYPE_RESERVED, 0, 0, 1, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_RESERVED_PKT_TYPE, emlHeaderValidate(&h));
+
+    h = {EML_PKT_TYPE_DATA, 8, 0, 1, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_SEQ_OUT_OF_RANGE, emlHeaderValidate(&h));
+
+    h = {EML_PKT_TYPE_DATA, 0, 8, 1, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_ACK_OUT_OF_RANGE, emlHeaderValidate(&h));
+
+    h = {EML_PKT_TYPE_DATA, 0, 0, 1, 4};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_FLOW_OUT_OF_RANGE, emlHeaderValidate(&h));
+
+    for (uint8_t rlen = 61; rlen <= 63; ++rlen)
+    {
+        h = {EML_PKT_TYPE_DATA, 0, 0, rlen, EML_FLOW_CTRL_NORMAL};
+        TEST_ASSERT_EQUAL(EML_HDR_ERR_RESERVED_LEN, emlHeaderValidate(&h, EML_MAX_PAYLOAD_LEN_64));
+    }
+
+    h = {EML_PKT_TYPE_DATA, 0, 0, 29, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_LEN_EXCEEDS_FRAME, emlHeaderValidate(&h, EML_MAX_PAYLOAD_LEN_32));
+
+    h = {EML_PKT_TYPE_DATA, 0, 0, 0, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_EMPTY_DATA, emlHeaderValidate(&h));
+
+    h = {EML_PKT_TYPE_KEEPALIVE, 0, 0, 1, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_NONEMPTY_KEEPALIVE, emlHeaderValidate(&h));
+
+    h = {EML_PKT_TYPE_SYNC, 0, 0, 0, EML_FLOW_CTRL_NORMAL};
+    TEST_ASSERT_EQUAL(EML_HDR_ERR_EMPTY_SYNC, emlHeaderValidate(&h));
+}
+
 // Unity setup/teardown
 void setUp() {}
 void tearDown() {}
@@ -726,6 +836,10 @@ int main(int argc, char **argv)
     RUN_TEST(test_encodingFullres16ch);
     RUN_TEST(test_encodingFullres12ch);
     RUN_TEST(test_decodingFullres16chLow);
+
+    RUN_TEST(test_eml_header_vectors);
+    RUN_TEST(test_eml_header_exhaustive_roundtrip);
+    RUN_TEST(test_eml_header_validation_errors);
 
     UNITY_END();
 
