@@ -683,7 +683,7 @@ void ICACHE_RAM_ATTR timerCallback()
   }
 
   // Do not transmit or advance FHSS/Nonce until in disconnected/connected state
-  if (connectionState == awaitingModelId)
+  if (connectionState == awaitingModelId || connectionState >= MODE_STATES)
     return;
 
   // Tx Antenna Diversity
@@ -733,7 +733,10 @@ static void UARTdisconnected()
 
 static void UARTconnected()
 {
-  webserverPreventAutoStart = true;
+  if (!firmwareOptions.is_airport)
+  {
+    webserverPreventAutoStart = true;
+  }
   rfModeLastChangedMS = millis(); // force syncspam on first packets
 
   auto index = adjustPacketRateForBaud(config.GetRate());
@@ -809,6 +812,13 @@ void ModelUpdateReq()
   }
 }
 
+static void waitForTxCompleteBounded()
+{
+  const uint32_t waitStartUs = micros();
+  while (busyTransmitting && (micros() - waitStartUs < 50000U));
+  busyTransmitting = false;
+}
+
 static void ConfigChangeCommit()
 {
   // Write the uncommitted eeprom values (may block for a while)
@@ -828,8 +838,8 @@ static void CheckConfigChangePending()
     if (syncSpamCounter > 0)
       return;
 
-    // wait until no longer transmitting
-    while (busyTransmitting);
+    // wait until no longer transmitting (bounded to 50ms in case DIO0 TX_DONE fails)
+    waitForTxCompleteBounded();
     // Set the commitInProgress flag to prevent any other RF SPI traffic during the commit from RX or scheduled TX
     commitInProgress = true;
     // If telemetry expected in the next interval, the radio was in RX mode
@@ -933,6 +943,7 @@ static void UpdateConnectDisconnectStatus()
     {
       DBGLN("got downlink conn");
       RxDisconnected_Ms = 0;
+      webserverPreventAutoStart = true;
       setConnectionState(connected);
 
       apInputBuffer.flush();
@@ -999,7 +1010,7 @@ static void EnterBindingMode()
 
   // Disable the TX timer and wait for any TX to complete
   hwTimer::stop();
-  while (busyTransmitting);
+  waitForTxCompleteBounded();
 
   // Queue up sending the Master UID as MSP packets
   SendUIDOverMSP();
@@ -1344,6 +1355,12 @@ static void setupTarget()
   // be saved later (fixed upstream, coming someday)
   Serial.end();
 #endif
+
+  if (firmwareOptions.is_airport && GPIO_PIN_BUTTON == UNDEF_PIN)
+  {
+    // Preserve GPIO0 as a pulled-up input so hardware UART bootloader entry (BOOT0 / DTR-RTS) is never contended
+    pinMode(0, INPUT_PULLUP);
+  }
 
   if (GPIO_PIN_ANT_CTRL != UNDEF_PIN)
   {

@@ -66,6 +66,7 @@ bool SX127xDriver::Begin()
 
   if (!DetectChip(SX12XX_Radio_1))
   {
+    End();
     return false;
   }
 
@@ -73,6 +74,7 @@ bool SX127xDriver::Begin()
   {
     if (!DetectChip(SX12XX_Radio_2))
     {
+      End();
       return false;
     }
   }

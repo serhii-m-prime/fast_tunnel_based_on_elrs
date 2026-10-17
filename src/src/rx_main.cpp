@@ -829,7 +829,8 @@ void LostConnection(bool resumeRx)
     {
         if (hwTimer::running)
         {
-            while(micros() - PFDloop.getIntEventTime() > 250); // time it just after the tock()
+            const uint32_t waitStartUs = micros();
+            while ((micros() - PFDloop.getIntEventTime() > 250) && (micros() - waitStartUs < 50000U)); // time it just after the tock(), bounded to 50ms
             hwTimer::stop();
         }
         SetRFLinkRate(ExpressLRS_nextAirRateIndex, false); // also sets to initialFreq
@@ -1622,6 +1623,10 @@ static void setupConfigAndPocCheck()
 
 static void setupTarget()
 {
+    if (firmwareOptions.is_airport && GPIO_PIN_BUTTON == UNDEF_PIN)
+    {
+        pinMode(0, INPUT_PULLUP);
+    }
     if (GPIO_PIN_ANT_CTRL != UNDEF_PIN)
     {
         pinMode(GPIO_PIN_ANT_CTRL, OUTPUT);
@@ -1666,13 +1671,13 @@ static void setupRadio()
 #elif defined(RADIO_LR2021)
     bool init_success = Radio.Begin(FHSSconfig->freq_center, FHSSconfigDualBand->freq_center);
 #endif
-    POWERMGNT::init();
     if (!init_success)
     {
         DBGLN("Failed to detect RF chipset!!!");
         setConnectionState(radioFailed);
         return;
     }
+    POWERMGNT::init();
 
     DynamicPower_UpdateRx(true);  // Call before SetRFLinkRate(). The LR1121 Radio lib can now set the correct output power in Config().
 
@@ -1841,8 +1846,11 @@ static void updateBindingMode(unsigned long now)
     // If the power on counter is >=3, enter binding, the counter will be reset after 2s
     else if (!InBindingMode && config.GetPowerOnCounter() >= 3)
     {
-        // Never enter wifi if forced to binding mode
-        webserverPreventAutoStart = true;
+        // In AirPort bridge mode keep Wi-Fi auto-start recovery active after 60s if bind does not complete
+        if (!firmwareOptions.is_airport)
+        {
+            webserverPreventAutoStart = true;
+        }
         DBGLN("Power on counter >=3, enter binding mode");
         EnterBindingMode();
     }

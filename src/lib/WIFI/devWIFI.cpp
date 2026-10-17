@@ -1500,25 +1500,44 @@ static int timeout()
 
   #if defined(TARGET_TX)
   // if webupdate was requested before or .wifi_auto_on_interval has elapsed but uart is not detected
-  // start webupdate, there might be wrong configuration flashed.
+  // (or in AirPort mode, no RF link has connected yet), start webupdate, there might be wrong configuration flashed.
   if(firmwareOptions.wifi_auto_on_interval != -1 && webserverPreventAutoStart == false && connectionState < wifiUpdate && !wifiStarted){
-    DBGLN("No CRSF ever detected, starting WiFi");
-    setWifiUpdateMode();
-    return DURATION_IMMEDIATELY;
-  }
-  #elif defined(TARGET_RX)
-  if (firmwareOptions.wifi_auto_on_interval != -1 && !webserverPreventAutoStart && (connectionState == disconnected))
-  {
+    if (firmwareOptions.is_airport && connectionState == connected)
+    {
+      webserverPreventAutoStart = true;
+      return DURATION_NEVER;
+    }
     static bool pastAutoInterval = false;
-    // If InBindingMode then wait at least 60 seconds before going into wifi,
-    // regardless of if .wifi_auto_on_interval is set to less
     if (!InBindingMode || firmwareOptions.wifi_auto_on_interval >= 60000 || pastAutoInterval)
     {
+      DBGLN("No CRSF/AirPort connection detected, starting WiFi");
       setWifiUpdateMode();
       return DURATION_IMMEDIATELY;
     }
     pastAutoInterval = true;
     return (60000 - firmwareOptions.wifi_auto_on_interval);
+  }
+  #elif defined(TARGET_RX)
+  if (firmwareOptions.wifi_auto_on_interval != -1 && !webserverPreventAutoStart)
+  {
+    if (connectionState == tentative)
+    {
+      // Re-check after 1s in case tentative lock fails back to disconnected
+      return 1000;
+    }
+    if (connectionState == disconnected)
+    {
+      static bool pastAutoInterval = false;
+      // If InBindingMode then wait at least 60 seconds before going into wifi,
+      // regardless of if .wifi_auto_on_interval is set to less
+      if (!InBindingMode || firmwareOptions.wifi_auto_on_interval >= 60000 || pastAutoInterval)
+      {
+        setWifiUpdateMode();
+        return DURATION_IMMEDIATELY;
+      }
+      pastAutoInterval = true;
+      return (60000 - firmwareOptions.wifi_auto_on_interval);
+    }
   }
   #endif
   return DURATION_NEVER;

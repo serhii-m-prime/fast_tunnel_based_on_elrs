@@ -84,6 +84,7 @@ void SX127xHal::reset(void)
         {
             pinMode(GPIO_PIN_RST_2, INPUT);
         }
+        delay(10); // Wait >= 5ms for SX127x oscillator & POR after releasing NRESET
     }
 
     DBGLN("SX127x Ready!");
