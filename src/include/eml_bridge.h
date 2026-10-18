@@ -4,6 +4,7 @@
 
 #if defined(EML_BRIDGE)
 #include "OTA.h"
+#include "eml_tdd.h"
 
 /**
  * EML bridge MAC (P4.2-P4.6). In EML_BRIDGE builds this replaces the stock ELRS
@@ -39,12 +40,14 @@ struct EmlMacStats_s
     uint32_t band_handovers, emergency_searches;
 };
 const EmlMacStats_s &emlBridgeMacStats();
+const EmlTddStats_s &emlBridgeTddStats();
 
 // P5.5: PHY-independent link metrics over the last 100 slot pairs (FSK has no SNR)
 struct EmlLinkStats_s
 {
     uint8_t phy_profile;  // EmlPhyProfile_e in use
     uint8_t band, pll_band_mask;
+    uint8_t tdd_mode, arq_window, in_flight;
     uint8_t lq;           // % of expected peer frames received intact
     uint8_t per;          // 100 - lq
     int8_t rssi;          // dBm, averaged

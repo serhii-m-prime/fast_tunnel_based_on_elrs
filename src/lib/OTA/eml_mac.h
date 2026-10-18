@@ -48,6 +48,7 @@
 // Session timing in milliseconds; converted to slots per profile.
 #define EML_HANDSHAKE_TIMEOUT_MS 700U
 #define EML_LINK_TIMEOUT_MS      1500U
+constexpr uint32_t EML_EMERGENCY_MS = 150;
 #define EML_RETRY_SLOTS          2U   // Sync repeated in every own slot
 #define EML_MAX_FRAME_AGE_SLOTS  3U   // descriptor may be processed up to one pair late
 #define EML_QUIET_SLOTS          5U
@@ -123,7 +124,10 @@ constexpr uint32_t emlLoraToaUs(uint8_t sf, uint32_t bwHz, uint8_t crDenom, uint
 // address, no hardware CRC, so the 64-byte FIFO holds exactly the frame.
 constexpr uint32_t emlFskToaUs(uint32_t bitrate, uint8_t preambleBytes, uint8_t syncBytes, uint16_t length, uint8_t crcBytes)
 {
-    return (uint32_t)((8ULL * (preambleBytes + syncBytes + length + crcBytes) * 1000000ULL + bitrate - 1ULL) / bitrate);
+    // RegBitrate + RegBitrateFrac quantization, using the same rounding as the
+    // SX127x driver. At nominal 300k the programmed rate is ~299941 bit/s.
+    return (uint32_t)((8ULL * (preambleBytes + syncBytes + length + crcBytes) *
+        ((512000000ULL + bitrate / 2U) / bitrate) * 1000000ULL + 512000000ULL - 1ULL) / 512000000ULL);
 }
 
 constexpr bool emlIsFsk(const EmlMacProfile_s &p) { return p.phy_profile == EML_PHY_FSK_250; }
@@ -298,7 +302,8 @@ inline size_t emlPutLe(uint8_t *out, size_t at, uint32_t value, uint8_t bytes)
     return at + bytes;
 }
 
-inline EmlTransportConfig_s emlMacTransportConfig(EmlRole_e role, const EmlLinkIds_s &ids, const EmlMacProfile_s &p, uint16_t hopCount)
+inline EmlTransportConfig_s emlMacTransportConfig(EmlRole_e role, const EmlLinkIds_s &ids, const EmlMacProfile_s &p, uint16_t hopCount,
+                                                  uint8_t window = 1, bool adaptive = false, bool shortAck = false)
 {
     EmlTransportConfig_s c = {};
     c.role = role;
@@ -313,6 +318,10 @@ inline EmlTransportConfig_s emlMacTransportConfig(EmlRole_e role, const EmlLinkI
     c.link_timeout_slots = emlMsToSlots(EML_LINK_TIMEOUT_MS, p.slot_us);
     c.quiet_slots = EML_QUIET_SLOTS;
     c.max_frame_age_slots = EML_MAX_FRAME_AGE_SLOTS;
+    c.window_size = window;
+    c.flexible_slots = adaptive;
+    c.short_ack = shortAck && emlIsFsk(p);
+    if (adaptive) { c.max_frame_age_slots = 7; c.quiet_slots = 9; }
     return c;
 }
 
@@ -321,7 +330,8 @@ inline EmlTransportConfig_s emlMacTransportConfig(EmlRole_e role, const EmlLinkI
  * differently bound pair never completes the handshake. configuration_id hashes the
  * exact record (PHY, N, slot, FHSS table inputs, timing); any change yields a new ID.
  */
-inline EmlLinkIds_s emlDeriveLinkIds(const uint8_t uid[6], const EmlMacProfile_s &p, const EmlFhssRecord_s &f, bool multiBand = false)
+inline EmlLinkIds_s emlDeriveLinkIds(const uint8_t uid[6], const EmlMacProfile_s &p, const EmlFhssRecord_s &f, bool multiBand = false,
+                                    uint8_t window = 0, bool adaptive = false, bool shortAck = false)
 {
     static const uint8_t tagT[4] = {'E', 'M', 'L', 'T'}, tagR[4] = {'E', 'M', 'L', 'R'};
     EmlLinkIds_s ids;
@@ -367,6 +377,12 @@ inline EmlLinkIds_s emlDeriveLinkIds(const uint8_t uid[6], const EmlMacProfile_s
         bands[at++] = 0xA5; // session-bound PROPOSE/ACK/COMMIT/STATUS extension
         for (uint8_t b = 0; b < EML_BAND_COUNT; ++b) at = emlPutLe(bands, at, emlBandEdgeHz(b), 4);
         ids.configuration = emlFnv1a(bands, at, ids.configuration);
+    }
+    if (window)
+    {
+        const uint8_t policy[] = {'P', '7', 1, window, (uint8_t)adaptive, (uint8_t)(shortAck && emlIsFsk(p)),
+                                 EML_TDD_LEASE_SLOTS, 24, 8, 59, 7, 9, 150, 3};
+        ids.configuration = emlFnv1a(policy, sizeof(policy), ids.configuration);
     }
     if (!ids.configuration) ids.configuration = 1;
     return ids;
@@ -496,7 +512,8 @@ public:
         if (d < 32U) pending_ |= 1UL << d;
     }
     // Every pair before `pair` is complete
-    void finalizeBefore(uint32_t pair)
+    template <typename Expected>
+    void finalizeExpectedBefore(uint32_t pair, Expected expected)
     {
         uint32_t n = pair - next_;
         if ((int32_t)n < 0)
@@ -505,9 +522,10 @@ public:
             if ((int32_t)n < -(int32_t)WINDOW) reset(pair);
             return;
         }
-        if (n > 2U * WINDOW) { reset(pair); for (uint8_t i = 0; i < WINDOW; ++i) push(false); return; }
-        while (n--) { push(pending_ & 1UL); pending_ >>= 1; ++next_; }
+        if (n > 2U * WINDOW) { reset(pair - 2U * WINDOW); n = 2U * WINDOW; }
+        while (n--) { if (expected(next_)) push(pending_ & 1UL); pending_ >>= 1; ++next_; }
     }
+    void finalizeBefore(uint32_t pair) { finalizeExpectedBefore(pair, [](uint32_t) { return true; }); }
     uint8_t lq() const { return count_ ? (uint8_t)((good_ * 100U) / count_) : 0; }
     uint8_t samples() const { return count_; }
 };

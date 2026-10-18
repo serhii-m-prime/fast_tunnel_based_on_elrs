@@ -8,6 +8,19 @@ RFAMP_hal RFAMP;
 SX127xDriver *SX127xDriver::instance = NULL;
 
 #if defined(EML_BRIDGE) && defined(SX127X_FSK_SUPPORT)
+bool ICACHE_RAM_ATTR SX127xDriver::SetPacketLength(uint8_t length)
+{
+  if (ModFSKorLoRa != SX127x_OPMODE_FSK_OOK) return length == PayloadLength;
+  if (length != 4 && length != 32 && length != 64) return false;
+  SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All);
+  if (length != PayloadLength)
+  {
+    hal.writeRegister(SX127X_FSK_REG_PAYLOAD_LENGTH, length, SX12XX_Radio_All);
+    PayloadLength = length;
+  }
+  return true;
+}
+
 bool SX127xDriver::ProbePll(uint32_t freq, uint32_t timeoutUs)
 {
   if (!timeoutUs || timeoutUs > 20000U) return false;

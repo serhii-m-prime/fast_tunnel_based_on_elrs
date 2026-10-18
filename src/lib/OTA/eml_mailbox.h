@@ -36,7 +36,7 @@ public:
                                                    uint32_t rxUs = 0, uint32_t slotStartUs = 0, uint8_t flags = 0,
                                                    int8_t rssi = 0)
     {
-        if (!bytes || (length != 32 && length != 64)) return false;
+        if (!bytes || (length != EML_ACK_FRAME_SIZE && length != 32 && length != 64)) return false;
         if (ticket && (!ticket->serial || ticket->generation != context.generation || ticket->slot != context.slot)) return false;
         const uint32_t head = __atomic_load_n(&head_, __ATOMIC_RELAXED);
         const uint32_t tail = __atomic_load_n(&tail_, __ATOMIC_ACQUIRE);

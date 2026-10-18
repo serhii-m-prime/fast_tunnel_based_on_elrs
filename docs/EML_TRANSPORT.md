@@ -2,6 +2,8 @@
 
 P3 реалізує foreground-транспорт у [`eml_transport.h`](../src/lib/OTA/eml_transport.h), bounded queues у [`eml_queue.h`](../src/lib/OTA/eml_queue.h), ISR handoff у [`eml_mailbox.h`](../src/lib/OTA/eml_mailbox.h) та UART batching у [`eml_uart.h`](../src/lib/OTA/eml_uart.h). Wire-формат і межі сесії визначено в [EML_PROTOCOL.md](EML_PROTOCOL.md).
 
+Актуальне розширення Bridge P7 — [EML_ADAPTIVE_TDD.md](EML_ADAPTIVE_TDD.md): `EmlTransport<N,W>` із W=1…4 (default Bridge W=4), кумулятивні ACK, статичний RX reorder buffer та короткі FSK ACK. Опис одного непідтвердженого кадра нижче залишається базовим контрактом W=1 і старих regression-тестів. Для W=4 є окремі перевірки порядку, backpressure, wrap і memory budget <3600 B на RX разом із двома mailbox.
+
 З P4.2–P4.6 Bridge-збірки (`EML_BRIDGE`) передають цей транспорт через радіо: LoRa-профіль, симетричний TDD, FHSS, захоплення та ISR-інтеграцію описано в [EML_MAC.md](EML_MAC.md). Legacy AirPort (OTA 8/13 байтів, FIFO нижче) лишається тільки для збірок з `USE_AIRPORT_AT_BAUD` без `EML_BRIDGE`; його відкинуті RF-кадри лише рахуються й не отримують гарантій доставки ARQ. Штатні RC/CRSF-пакети не змінено.
 
 ## Власність стану та буферів
@@ -23,7 +25,7 @@ P3 реалізує foreground-транспорт у [`eml_transport.h`](../src/
 Обмеження конфігурації:
 
 - `retry_slots >= 2`;
-- `1 <= max_frame_age_slots < 16` — кадр не може пережити мінімальний повний оберт 8 sequence при одному TX-слоті на пару;
+- `1 <= max_frame_age_slots < 8` — кадр не може пережити мінімальний повний оберт 8 sequence при адаптивних послідовних TX-слотах;
 - `quiet_slots > max_frame_age_slots`;
 - `handshake_timeout_slots > quiet_slots + retry_slots`;
 - `link_timeout_slots > handshake_timeout_slots`, `<32768`.

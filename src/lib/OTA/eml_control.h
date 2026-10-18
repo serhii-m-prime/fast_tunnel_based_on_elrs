@@ -5,6 +5,8 @@
 // Session-bound link control carried in a normal fixed-length SYNC frame.
 // 28 bytes fits EML32. Handshake phases 0..3 retain their existing layout.
 enum : uint8_t { EML_BAND_PROPOSE = 4, EML_BAND_ACK = 5, EML_BAND_COMMIT = 6, EML_BAND_STATUS = 7 };
+enum : uint8_t { EML_TDD_PROPOSE = 8, EML_TDD_ACK = 9, EML_TDD_COMMIT = 10, EML_TDD_STATUS = 11 };
+constexpr uint8_t EML_TDD_LEASE_SLOTS = 64;
 struct EmlBandMessage_s
 {
     uint8_t op, band, mask;
@@ -13,6 +15,9 @@ struct EmlBandMessage_s
 
 inline bool emlBandMessageValid(const EmlBandMessage_s &m)
 {
+    if (m.op >= EML_TDD_PROPOSE && m.op <= EML_TDD_STATUS)
+        return m.band <= 2 && (m.op == EML_TDD_STATUS ? m.mask <= 7 :
+            m.mask == EML_TDD_LEASE_SLOTS && !(m.switch_slot & 3U) && m.token);
     return m.op >= EML_BAND_PROPOSE && m.op <= EML_BAND_STATUS && m.band < 4 &&
         m.mask && !(m.mask & 0xF0U) && (m.mask & (1U << m.band)) &&
         (m.op == EML_BAND_STATUS ? (m.token >> 8) <= 100 : m.token && !(m.switch_slot & 1U));

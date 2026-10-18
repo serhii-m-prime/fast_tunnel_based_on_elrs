@@ -4,6 +4,7 @@
 #include "eml_queue.h"
 #include "eml_sync.h"
 #include "eml_control.h"
+#include "eml_ack.h"
 
 enum EmlRole_e : uint8_t { EML_COORDINATOR = 0, EML_RESPONDER = 1 };
 enum EmlSessionState_e : uint8_t
@@ -25,6 +26,9 @@ struct EmlTransportConfig_s
     uint16_t link_timeout_slots;
     uint16_t quiet_slots;
     uint8_t max_frame_age_slots;
+    uint8_t window_size; // 0 retains legacy W=1 configuration initializers
+    bool flexible_slots; // ownership was checked by the MAC
+    bool short_ack;      // FSK fixed control anchors only
 };
 
 // Captured by the MAC when a receive is armed, not when a delayed callback runs.
@@ -52,6 +56,7 @@ struct EmlTransportStats_s
     uint32_t transmitted = 0, retransmitted = 0, received = 0;
     uint32_t duplicates = 0, backpressure = 0, invalid = 0, stale = 0;
     uint32_t ignored_ack = 0, session_resets = 0, sessions_opened = 0;
+    uint32_t acknowledged_bytes = 0, out_of_order = 0;
 };
 
 enum EmlReceiveResult_e : uint8_t
@@ -61,27 +66,34 @@ enum EmlReceiveResult_e : uint8_t
 };
 
 /**
- * One foreground owner, two independent stop-and-wait directions. No ISR,
+ * One foreground owner, two independent bounded ARQ windows. No ISR,
  * Arduino, heap, timers, SPI, UART or RF calls. The MAC owns the slot/hop clock
  * and supplies freshness metadata; a successful codec alone cannot bind DATA
  * to a session. Configuration/epoch generation must be provisioned by caller.
  */
-template <size_t QueueCapacity>
+template <size_t QueueCapacity, uint8_t WindowSize = 1>
 class EmlTransport
 {
     static_assert(QueueCapacity >= EML_MAX_PAYLOAD_LEN, "Queue must fit a maximum DATA");
+    static_assert(WindowSize >= 1 && WindowSize <= EML_SEQ_MODULO / 2, "3-bit sequence space: W <= 4");
     EmlByteQueue<QueueCapacity> tx_, rx_;
+    struct TxEntry { uint32_t first, last; uint8_t length; bool sent; };
+    struct RxEntry { uint8_t bytes[EML_MAX_PAYLOAD_LEN]; uint8_t length; };
+    TxEntry txWindow_[WindowSize] = {};
+    RxEntry rxWindow_[WindowSize] = {};
+    uint8_t txHead_ = 0, txCount_ = 0, rxHead_ = 0;
+    size_t issuedBytes_ = 0, reorderBytes_ = 0;
     EmlTransportConfig_s config_ = {};
     EmlTransportStats_s stats_;
     EmlSessionState_e state_ = EML_LISTENING;
-    bool configured_ = false, session_ = false, pending_ = false, pendingSent_ = false;
+    bool configured_ = false, session_ = false;
     bool receivedData_ = false, haveRxSlot_ = false, syncSent_ = false, readyReply_ = false;
     uint32_t generation_ = 0, epochCounter_ = 0, txEpoch_ = 0, rxEpoch_ = 0;
     uint32_t candidateTx_ = 0, candidateRx_ = 0, attemptStarted_ = 0, quietStarted_ = 0;
-    uint32_t lastGood_ = 0, lastRxSlot_ = 0, lastSyncSent_ = 0, firstSentSlot_ = 0;
+    uint32_t lastGood_ = 0, lastRxSlot_ = 0, lastSyncSent_ = 0;
     uint32_t serial_ = 0;
     EmlTxTicket_s ticket_ = {};
-    uint8_t nextTx_ = 0, pendingSeq_ = 0, pendingLength_ = 0, lastIssued_ = 7;
+    uint8_t nextTx_ = 0, lastIssued_ = 7;
     uint8_t expectedRx_ = 0, lastAck_ = 7, peerFlow_ = EML_FLOW_CTRL_NORMAL;
     uint8_t phasesSent_ = 0;
 
@@ -89,12 +101,49 @@ class EmlTransport
     uint32_t nextEpoch() { if (++epochCounter_ == 0) ++epochCounter_; return epochCounter_; }
     void newGeneration() { if (++generation_ == 0) ++generation_; ticket_ = {}; haveRxSlot_ = false; }
     bool quiet(uint32_t now) const { return now - quietStarted_ < config_.quiet_slots; }
+    void applyAck(uint8_t ack, uint32_t slot)
+    {
+        const uint8_t ackCount = (uint8_t)(((ack - nextTx_) & EML_SEQ_MASK) + 1U);
+        if (ackCount <= txCount_)
+        {
+            bool sentAll = true;
+            for (uint8_t i = 0; i < ackCount; ++i)
+            {
+                const TxEntry &entry = txWindow_[(txHead_ + i) % WindowSize];
+                if (!entry.sent || !newer(slot, entry.first)) sentAll = false;
+            }
+            if (sentAll)
+            {
+                for (uint8_t i = 0; i < ackCount; ++i)
+                {
+                    const uint8_t n = txWindow_[txHead_].length;
+                    tx_.consume(n); issuedBytes_ -= n; stats_.acknowledged_bytes += n;
+                    txHead_ = (uint8_t)((txHead_ + 1U) % WindowSize);
+                    nextTx_ = emlSeqNext(nextTx_); --txCount_;
+                }
+            }
+            else ++stats_.ignored_ack;
+        }
+        else if (txCount_ && ack != ((nextTx_ - 1U) & EML_SEQ_MASK)) ++stats_.ignored_ack;
+    }
+    void flushReorder()
+    {
+        while (rxWindow_[rxHead_].length && rx_.free() >= rxWindow_[rxHead_].length)
+        {
+            RxEntry &entry = rxWindow_[rxHead_];
+            rx_.push(entry.bytes, entry.length); reorderBytes_ -= entry.length; entry.length = 0;
+            lastAck_ = expectedRx_; expectedRx_ = emlSeqNext(expectedRx_); receivedData_ = true;
+            rxHead_ = (uint8_t)((rxHead_ + 1U) % WindowSize);
+        }
+    }
     void discardTransport()
     {
         stats_.discarded_tx += tx_.size();
-        stats_.discarded_rx += rx_.size();
+        stats_.discarded_rx += rx_.size() + reorderBytes_;
         tx_.clear(); rx_.clear();
-        pending_ = pendingSent_ = receivedData_ = false;
+        txHead_ = txCount_ = rxHead_ = 0; issuedBytes_ = reorderBytes_ = 0;
+        for (uint8_t i = 0; i < WindowSize; ++i) { txWindow_[i] = {}; rxWindow_[i].length = 0; }
+        receivedData_ = false;
         nextTx_ = expectedRx_ = 0;
         lastIssued_ = lastAck_ = 7;
         peerFlow_ = EML_FLOW_CTRL_NORMAL;
@@ -184,7 +233,9 @@ public:
         return c.role <= EML_RESPONDER && c.local_id && c.peer_id && c.local_id != c.peer_id &&
             c.configuration_id && (c.phy_profile == EML_PHY_LORA_500_SF6_CR45 || c.phy_profile == EML_PHY_FSK_250) &&
             (c.frame_size == 32 || c.frame_size == 64) && c.hop_count && c.retry_slots >= 2 &&
-            c.max_frame_age_slots && c.max_frame_age_slots < 2U * EML_SEQ_MODULO &&
+            (c.window_size ? c.window_size == WindowSize : WindowSize == 1) &&
+            (!c.short_ack || c.phy_profile == EML_PHY_FSK_250) &&
+            c.max_frame_age_slots && c.max_frame_age_slots < EML_SEQ_MODULO &&
             c.quiet_slots > c.max_frame_age_slots && c.handshake_timeout_slots > c.quiet_slots + c.retry_slots &&
             c.link_timeout_slots > c.handshake_timeout_slots && c.link_timeout_slots < 32768;
     }
@@ -226,7 +277,9 @@ public:
     uint8_t nextTxSequence() const { return nextTx_; }
     uint8_t expectedRxSequence() const { return expectedRx_; }
     uint8_t acknowledgedRxSequence() const { return lastAck_; }
-    bool pending() const { return pending_; }
+    bool pending() const { return txCount_ != 0; }
+    uint8_t inFlight() const { return txCount_; }
+    uint8_t peerFlowControl() const { return peerFlow_; }
     size_t queuedTx() const { return tx_.size(); }
     size_t queuedRx() const { return rx_.size(); }
     size_t uartSpace() const { return active() ? tx_.free() : 0; }
@@ -244,24 +297,31 @@ public:
     {
         if (!rx_.consume(count)) return false;
         stats_.uart_delivered += count;
+        // A buffered tail may have become the head while UART was full. Its
+        // retry is a duplicate, so only draining UART can unblock delivery.
+        flushReorder();
         return true;
     }
     uint8_t flowControl() const
     {
         const size_t maximum = emlMaxPayloadForFrameSize(config_.frame_size);
-        if (rx_.free() < maximum) return EML_FLOW_CTRL_PAUSE;
-        if (rx_.free() < 2U * maximum || rx_.size() * 4U >= QueueCapacity * 3U) return EML_FLOW_CTRL_CRITICAL;
-        if (rx_.free() < 4U * maximum || rx_.size() * 2U >= QueueCapacity) return EML_FLOW_CTRL_HIGH_WATER;
+        const size_t free = rx_.free() - reorderBytes_, used = rx_.size() + reorderBytes_;
+        if (free < maximum) return EML_FLOW_CTRL_PAUSE;
+        if (free < 2U * maximum || used * 4U >= QueueCapacity * 3U) return EML_FLOW_CTRL_CRITICAL;
+        if (free < 4U * maximum || used * 2U >= QueueCapacity) return EML_FLOW_CTRL_HIGH_WATER;
         return EML_FLOW_CTRL_NORMAL;
     }
     bool prepare(uint32_t slot, uint16_t hop, uint8_t *out, size_t capacity, EmlTxTicket_s *ticket,
-                 const EmlBandMessage_s *control = nullptr)
+                 const EmlBandMessage_s *control = nullptr, bool shortFrame = false)
     {
         tick(slot);
         if (!configured_ || !out || !ticket || capacity < config_.frame_size ||
-            hop >= config_.hop_count || (slot & 1U) != config_.role) return false;
+            hop >= config_.hop_count || (!config_.flexible_slots && (slot & 1U) != config_.role)) return false;
+        if (shortFrame && (!config_.short_ack || !emlShortAckSlot(slot) || !active() || readyReply_)) return false;
         EmlHeader_s header = {EML_PKT_TYPE_KEEPALIVE, lastIssued_, lastAck_, 0, flowControl()};
         uint8_t phase = 0;
+        int selected = -1;
+        bool allocate = false;
         if (!active() || readyReply_)
         {
             if (state_ == EML_LISTENING ||
@@ -277,7 +337,7 @@ public:
             if (emlSyncEncode(&s, out + 2, capacity - 2) != EML_SYNC_OK) return false;
             header = {EML_PKT_TYPE_SYNC, 7, 7, EML_SYNC_PAYLOAD_SIZE, EML_FLOW_CTRL_PAUSE};
         }
-        else if (control && emlBandMessageValid(*control) && (control->op & 1U) == config_.role)
+        else if (!shortFrame && control && emlBandMessageValid(*control) && (control->op & 1U) == config_.role)
         {
             phase = control->op;
             emlBandMessageWrite(*control, out + 2);
@@ -286,20 +346,40 @@ public:
             emlSyncWrite32(out + 14, config_.role == EML_COORDINATOR ? txEpoch_ : rxEpoch_);
             emlSyncWrite32(out + 18, config_.role == EML_COORDINATOR ? rxEpoch_ : txEpoch_);
             emlSyncWrite32(out + 22, config_.configuration_id);
-            header = {EML_PKT_TYPE_SYNC, 7, 7, EML_SYNC_PAYLOAD_SIZE, EML_FLOW_CTRL_PAUSE};
+            header = control->op >= EML_TDD_PROPOSE ?
+                EmlHeader_s{EML_PKT_TYPE_SYNC, lastIssued_, lastAck_, EML_SYNC_PAYLOAD_SIZE, flowControl()} :
+                EmlHeader_s{EML_PKT_TYPE_SYNC, 7, 7, EML_SYNC_PAYLOAD_SIZE, EML_FLOW_CTRL_PAUSE};
         }
-        else if (!quiet(slot) && (pending_ || (tx_.size() && peerFlow_ != EML_FLOW_CTRL_PAUSE)))
+        else if (!shortFrame && !quiet(slot))
         {
-            const uint8_t length = pending_ ? pendingLength_ : (uint8_t)(tx_.size() < emlMaxPayloadForFrameSize(config_.frame_size) ? tx_.size() : emlMaxPayloadForFrameSize(config_.frame_size));
-            tx_.peek(out + 2, length);
-            header = {EML_PKT_TYPE_DATA, pending_ ? pendingSeq_ : nextTx_, lastAck_, length, flowControl()};
+            // Reuse an unsent descriptor after an early/late prepare. New frames
+            // fill the window before retrying its oldest gap.
+            size_t offset = 0;
+            for (uint8_t i = 0; i < txCount_; ++i)
+            {
+                if (!txWindow_[(txHead_ + i) % WindowSize].sent) { selected = i; break; }
+                offset += txWindow_[(txHead_ + i) % WindowSize].length;
+            }
+            if (selected < 0 && txCount_ < WindowSize && tx_.size() > issuedBytes_ && peerFlow_ != EML_FLOW_CTRL_PAUSE)
+            { selected = txCount_; offset = issuedBytes_; allocate = true; }
+            if (selected < 0 && txCount_ && slot - txWindow_[txHead_].last >= config_.retry_slots)
+            { selected = 0; offset = 0; }
+            if (selected >= 0)
+            {
+                const uint8_t length = allocate ? (uint8_t)((tx_.size() - offset < emlMaxPayloadForFrameSize(config_.frame_size)) ?
+                    tx_.size() - offset : emlMaxPayloadForFrameSize(config_.frame_size)) : txWindow_[(txHead_ + selected) % WindowSize].length;
+                tx_.peek(out + 2, length, offset);
+                phase = (uint8_t)((nextTx_ + selected) & EML_SEQ_MASK);
+                header = {EML_PKT_TYPE_DATA, phase, lastAck_, length, flowControl()};
+            }
         }
-        if (emlFrameEncode(&header, out + 2, header.payload_len, out, capacity, config_.frame_size) != EML_FRAME_OK)
+        if (shortFrame ? !emlAckEncode(header, out, capacity) :
+            emlFrameEncode(&header, out + 2, header.payload_len, out, capacity, config_.frame_size) != EML_FRAME_OK)
             return false;
-        if (header.pkt_type == EML_PKT_TYPE_DATA && !pending_)
+        if (allocate)
         {
-            pending_ = true; pendingSent_ = false;
-            pendingSeq_ = nextTx_; pendingLength_ = header.payload_len; lastIssued_ = pendingSeq_;
+            txWindow_[(txHead_ + txCount_) % WindowSize] = {0, 0, header.payload_len, false};
+            ++txCount_; issuedBytes_ += header.payload_len; lastIssued_ = header.seq_num;
         }
         if (++serial_ == 0) ++serial_;
         ticket_ = {generation_, slot, serial_, header.pkt_type, phase};
@@ -310,7 +390,8 @@ public:
     {
         return configured_ && ticket.generation == generation_ && ticket.serial == ticket_.serial &&
             ticket.serial && ticket.slot == slot && ticket.slot == ticket_.slot && ticket.type == ticket_.type &&
-            ticket.phase == ticket_.phase && (ticket.type != EML_PKT_TYPE_DATA || (active() && pending_));
+            ticket.phase == ticket_.phase && (ticket.type != EML_PKT_TYPE_DATA ||
+                (active() && ((ticket.phase - nextTx_) & EML_SEQ_MASK) < txCount_));
     }
     bool sent(const EmlTxTicket_s &ticket, uint32_t slot)
     {
@@ -323,8 +404,10 @@ public:
         }
         if (ticket.type == EML_PKT_TYPE_DATA)
         {
-            if (pendingSent_) ++stats_.retransmitted;
-            else { pendingSent_ = true; firstSentSlot_ = slot; }
+            TxEntry &entry = txWindow_[(txHead_ + ((ticket.phase - nextTx_) & EML_SEQ_MASK)) % WindowSize];
+            if (entry.sent) ++stats_.retransmitted;
+            else { entry.sent = true; entry.first = slot; }
+            entry.last = slot;
         }
         ticket_.serial = 0; // completion is exactly once
         return true;
@@ -337,21 +420,30 @@ public:
         if (context.generation != generation_ || age > config_.max_frame_age_slots ||
             (haveRxSlot_ && !newer(context.slot, lastRxSlot_)))
         { ++stats_.stale; return EML_RX_STALE; }
-        if (context.hop >= config_.hop_count || (context.slot & 1U) == config_.role) return reject();
+        if (context.hop >= config_.hop_count || (!config_.flexible_slots && (context.slot & 1U) == config_.role)) return reject();
         EmlFrameView_s frame = {};
-        if (emlFrameDecode(bytes, length, config_.frame_size, &frame) != EML_FRAME_OK) return reject();
+        if (length == EML_ACK_FRAME_SIZE)
+        {
+            if (!config_.short_ack || !emlShortAckSlot(context.slot) || !emlAckDecode(bytes, length, &frame)) return reject();
+        }
+        else if (emlFrameDecode(bytes, length, config_.frame_size, &frame) != EML_FRAME_OK) return reject();
         if (frame.header.pkt_type == EML_PKT_TYPE_SYNC)
         {
             if (frame.header.payload_len == EML_SYNC_PAYLOAD_SIZE && frame.payload[1] >= EML_BAND_PROPOSE)
             {
                 EmlBandMessage_s m;
                 const uint8_t *p = frame.payload;
-                if (!active() || quiet(now) || frame.header.seq_num != 7 || frame.header.ack_num != 7 ||
-                    frame.header.flow_ctrl != EML_FLOW_CTRL_PAUSE || !emlBandMessageRead(p, frame.header.payload_len, &m) ||
+                if (!active() || quiet(now) || !emlBandMessageRead(p, frame.header.payload_len, &m) ||
+                    (m.op < EML_TDD_PROPOSE && (frame.header.seq_num != 7 || frame.header.ack_num != 7 || frame.header.flow_ctrl != EML_FLOW_CTRL_PAUSE)) ||
                     (m.op & 1U) == config_.role || emlSyncRead32(p + 4) != config_.peer_id ||
                     emlSyncRead32(p + 8) != config_.local_id || emlSyncRead32(p + 20) != config_.configuration_id ||
                     emlSyncRead32(p + 12) != (config_.role == EML_COORDINATOR ? rxEpoch_ : txEpoch_) ||
                     emlSyncRead32(p + 16) != (config_.role == EML_COORDINATOR ? txEpoch_ : rxEpoch_)) return reject();
+                if (m.op >= EML_TDD_PROPOSE)
+                {
+                    peerFlow_ = frame.header.flow_ctrl;
+                    applyAck(frame.header.ack_num, context.slot);
+                }
                 lastRxSlot_ = context.slot; haveRxSlot_ = true; lastGood_ = now; ++stats_.received;
                 return EML_RX_CONTROL;
             }
@@ -366,22 +458,35 @@ public:
         { state_ = EML_ACTIVE; lastGood_ = now; }
         if (!active() || quiet(now)) return reject();
         const bool data = frame.header.pkt_type == EML_PKT_TYPE_DATA;
-        const bool duplicate = data && receivedData_ && frame.header.seq_num == lastAck_;
-        if (data && !duplicate && frame.header.seq_num != expectedRx_) return reject();
+        const uint8_t distance = (uint8_t)((frame.header.seq_num - expectedRx_) & EML_SEQ_MASK);
+        const uint8_t behind = (uint8_t)((expectedRx_ - frame.header.seq_num) & EML_SEQ_MASK);
+        const bool duplicate = data && ((receivedData_ && behind && behind <= WindowSize) ||
+            (distance < WindowSize && rxWindow_[(rxHead_ + distance) % WindowSize].length));
+        if (data && !duplicate && distance >= WindowSize) return reject();
         lastRxSlot_ = context.slot; haveRxSlot_ = true; lastGood_ = now; ++stats_.received;
         peerFlow_ = frame.header.flow_ctrl;
-        if (pending_ && pendingSent_ && frame.header.ack_num == pendingSeq_ && newer(context.slot, firstSentSlot_))
-        {
-            tx_.consume(pendingLength_); nextTx_ = emlSeqNext(pendingSeq_);
-            pending_ = pendingSent_ = false;
-        }
-        else if (pending_ && frame.header.ack_num != ((nextTx_ - 1U) & EML_SEQ_MASK)) ++stats_.ignored_ack;
+        applyAck(frame.header.ack_num, context.slot);
         if (duplicate) { ++stats_.duplicates; return EML_RX_DUPLICATE; }
         if (data)
         {
-            if (!rx_.push(frame.payload, frame.header.payload_len))
-            { ++stats_.backpressure; return EML_RX_BACKPRESSURE; }
-            lastAck_ = frame.header.seq_num; expectedRx_ = emlSeqNext(expectedRx_); receivedData_ = true;
+            if (!distance)
+            {
+                if (!rx_.push(frame.payload, frame.header.payload_len))
+                { ++stats_.backpressure; return EML_RX_BACKPRESSURE; }
+                lastAck_ = expectedRx_; expectedRx_ = emlSeqNext(expectedRx_); receivedData_ = true;
+                rxHead_ = (uint8_t)((rxHead_ + 1U) % WindowSize);
+                flushReorder();
+            }
+            else
+            {
+                // Reserve room for the missing head plus every buffered tail.
+                // No cumulative ACK advances until the head reaches delivery.
+                if (rx_.free() < reorderBytes_ + frame.header.payload_len + emlMaxPayloadForFrameSize(config_.frame_size))
+                { ++stats_.backpressure; return EML_RX_BACKPRESSURE; }
+                RxEntry &entry = rxWindow_[(rxHead_ + distance) % WindowSize];
+                memcpy(entry.bytes, frame.payload, frame.header.payload_len); entry.length = frame.header.payload_len;
+                reorderBytes_ += entry.length; ++stats_.out_of_order;
+            }
         }
         return EML_RX_ACCEPTED;
     }

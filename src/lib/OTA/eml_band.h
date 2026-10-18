@@ -3,7 +3,6 @@
 #include "eml_mac.h"
 #include "eml_fhss.h"
 
-constexpr uint32_t EML_EMERGENCY_MS = 150;
 constexpr uint32_t EML_BAND_HOLD_MS = 2000;
 constexpr uint32_t EML_BAND_PROMOTE_MS = 30000;
 constexpr uint16_t EML_BAND_LEAD_SLOTS = 24;
@@ -77,7 +76,7 @@ public:
         }
         // Regular status provides the peer mask and reports reverse-link degradation.
         // It is separate from raw UART bytes and consumes one normal TDD slot.
-        if (role_ == EML_RESPONDER && ((slot & 31U) == 1U || (samples >= 10 && lq < 60) || missedAck >= 4))
+        if (role_ == EML_RESPONDER && ((slot & 63U) == 35U || (samples >= 10 && lq < 60) || missedAck >= 4))
         {
             *out = {EML_BAND_STATUS, band_, mask_, (uint16_t)slot,
                     (uint16_t)((uint16_t)(samples >= 10 ? lq : 100) << 8 | missedAck)};

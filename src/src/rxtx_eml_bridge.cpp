@@ -8,6 +8,7 @@
 #include "hwTimer.h"
 #include "logging.h"
 #include "eml_band.h"
+#include "eml_tdd.h"
 #if defined(PLATFORM_ESP32)
 #include <esp_system.h>
 #endif
@@ -78,11 +79,23 @@ static portMUX_TYPE emlMux = portMUX_INITIALIZER_UNLOCKED;
 #define EML_CRITICAL_EXIT()  interrupts()
 #endif
 
+#ifndef EML_ARQ_WINDOW
+#define EML_ARQ_WINDOW 4
+#endif
+#ifndef EML_ADAPTIVE_TDD
+#define EML_ADAPTIVE_TDD 1
+#endif
+#ifndef EML_SHORT_ACK
+#define EML_SHORT_ACK 1
+#endif
+static constexpr bool kAdaptive = EML_ADAPTIVE_TDD && EML_ARQ_WINDOW > 1;
+static_assert(EML_ARQ_WINDOW >= 1 && EML_ARQ_WINDOW <= 4, "EML_ARQ_WINDOW must be 1..4");
+
 // ---- State ------------------------------------------------------------------------
 // The transport rings replace the legacy AirPort FIFOs (P3.5/P4.6): 4096 B per
 // direction on the ESP32 TX, 1024 B on the ESP8285 RX.
-static EmlTransport<AP_MAX_BUF_LEN> transport;
-static EmlTransportUart<AP_MAX_BUF_LEN> uartAdapter(transport);
+static EmlTransport<AP_MAX_BUF_LEN, EML_ARQ_WINDOW> transport;
+static EmlTransportUart<AP_MAX_BUF_LEN, EML_ARQ_WINDOW> uartAdapter(transport);
 static EmlTransportConfig_s transportConfig;
 static EmlUartStats_s uartStats;
 static EmlMacStats_s macStats;
@@ -90,6 +103,10 @@ static EmlMacStats_s macStats;
 static EmlPhyPlan_s phyPlan;
 static EmlBandSearch bandSearch;
 static EmlBandController bandController;
+static EmlTddController tddController;
+static EmlTddPlan_s macTddPlan = {};
+static volatile bool useShortAck = false;
+static uint32_t tddGeneration = 0, acknowledgedBytes = 0;
 static uint8_t pllMasks[EML_PHY_MAX] = {};
 static const EmlMacProfile_s *profile = &kPhyOrder[0];
 static EmlFhssRecord_s fhssRecord;
@@ -125,6 +142,7 @@ struct EmlArmedRx_s
     EmlRxContext_s context;
     uint32_t start_us;
     uint8_t flags;
+    uint8_t length;
     bool valid;
     bool taken;
 };
@@ -150,6 +168,13 @@ static uint32_t lastHeardSlot = 0;
 static uint16_t researchSlots = 0;
 
 // ---- ISR side ---------------------------------------------------------------------
+static uint8_t ICACHE_RAM_ATTR physicalLength(uint32_t slot)
+{
+    return useShortAck && emlShortAckSlot(slot) ? EML_ACK_FRAME_SIZE : kFrameSize;
+}
+
+static uint32_t nextOwn(uint32_t slot) { return emlTddNextOwn(slot, kRole, macTddPlan); }
+
 static uint32_t ICACHE_RAM_ATTR hopFreq(uint16_t hop)
 {
     return freqStart + (freqSpread * FHSSsequence[hop] / FREQ_SPREAD_SCALE) - FreqCorrection;
@@ -162,6 +187,7 @@ static void ICACHE_RAM_ATTR armRx(uint32_t slot, uint16_t hop, uint32_t startUs,
     armed.context.hop = hop;
     armed.start_us = startUs;
     armed.flags = flags;
+    armed.length = flags & EML_DESC_SEARCH ? kFrameSize : physicalLength(slot);
     armed.taken = false;
     armed.valid = true;
 }
@@ -184,14 +210,16 @@ static void ICACHE_RAM_ATTR ownBoundary(uint32_t slot, uint16_t hop, uint32_t no
     while (txMailbox.pop(&isrTx[next]))
     {
         const EmlRadioDescriptor_s &d = isrTx[next];
-        if (d.ticket.slot == slot && d.ticket.generation == macGeneration && d.length == kFrameSize)
+        if (d.ticket.slot == slot && d.ticket.generation == macGeneration && d.length == physicalLength(slot))
         {
             found = (int8_t)next;
             next ^= 1U;
         }
     }
 
+    armed.valid = false;
     Radio.SetFrequencyReg(hopFreq(hop), SX12XX_Radio_All, false);
+    Radio.SetPacketLength(physicalLength(slot));
     if (found >= 0)
     {
         txActive = true;
@@ -203,29 +231,21 @@ static void ICACHE_RAM_ATTR ownBoundary(uint32_t slot, uint16_t hop, uint32_t no
     else
     {
         ++macStats.tx_no_frame;
-        if (kRole == EML_COORDINATOR)
-        {
-            Radio.RXnb();
-            armRx(slot + 1U, hop, nowUs + slotUs, 0);
-        }
+        Radio.RXnb();
+        armRx(slot, hop, nowUs, 0);
     }
 }
 
 static void ICACHE_RAM_ATTR peerBoundary(uint32_t slot, uint16_t hop, uint32_t nowUs)
 {
-    if (kRole == EML_RESPONDER)
+    if (armed.valid && armed.context.slot == slot && armed.context.hop == hop)
     {
-        // Even slot: hop (the pair's new channel) and listen for the coordinator
-        Radio.SetFrequencyReg(hopFreq(hop), SX12XX_Radio_All, false);
-        Radio.RXnb();
-        armRx(slot, hop, nowUs, 0);
-    }
-    else if (armed.valid && armed.context.slot == slot)
-    {
-        armed.start_us = nowUs; // RX was armed at TX done; use the real boundary
+        armed.start_us = nowUs;
     }
     else
     {
+        Radio.SetFrequencyReg(hopFreq(hop), SX12XX_Radio_All, false);
+        Radio.SetPacketLength(physicalLength(slot));
         Radio.RXnb();
         armRx(slot, hop, nowUs, 0);
     }
@@ -277,7 +297,7 @@ static void ICACHE_RAM_ATTR emlTimerTock()
             txActive = false;
             ++macStats.tx_overrun;
         }
-        if (emlOwnSlot(slot, kRole))
+        if (emlTddOwner(slot, macTddPlan) == kRole)
             ownBoundary(slot, hop, nowUs);
         else
             peerBoundary(slot, hop, nowUs);
@@ -295,11 +315,14 @@ static void ICACHE_RAM_ATTR emlTxDone()
     txActive = false;
     if (macSuspended || macMode != MAC_LOCKED)
         return;
-    if (kRole == EML_COORDINATOR)
+    EmlSlotClock_s next = slotClock;
+    emlClockAdvance(next);
+    if (emlTddOwner(next.slot, macTddPlan) != kRole)
     {
-        // The responder answers on the same hop in the next slot
+        Radio.SetFrequencyReg(hopFreq(next.hop), SX12XX_Radio_All, false);
+        Radio.SetPacketLength(physicalLength(next.slot));
         Radio.RXnb();
-        armRx(slotClock.slot + 1U, slotClock.hop, boundaryUs + slotUs, 0);
+        armRx(next.slot, next.hop, boundaryUs + slotUs, 0);
     }
 }
 
@@ -313,7 +336,7 @@ static bool ICACHE_RAM_ATTR emlRxDone(SX12xxDriverCommon::rx_status const status
         armed.taken = true;
     // LoRa: packet RSSI register; FSK: RSSI sampled by the driver at PayloadReady
     const int8_t rssi = Radio.GetLastPacketRSSI(SX12XX_Radio_1);
-    if (rxMailbox.push(Radio.RXdataBuffer, kFrameSize, armed.context, nullptr, rxUs, armed.start_us, armed.flags, rssi))
+    if (rxMailbox.push(Radio.RXdataBuffer, armed.length, armed.context, nullptr, rxUs, armed.start_us, armed.flags, rssi))
         ++macStats.rx_frames;
     else
         ++macStats.rx_dropped;
@@ -345,6 +368,14 @@ static EmlBoundary_s readBoundary()
 static void publishGeneration()
 {
     macGeneration = transport.generation();
+    if (tddGeneration != macGeneration)
+    {
+        tddGeneration = macGeneration;
+        tddController.begin(kRole, kAdaptive, slotClock.slot);
+        EML_CRITICAL_ENTER();
+        macTddPlan = {};
+        EML_CRITICAL_EXIT();
+    }
 }
 
 static uint32_t freshEpochSeed()
@@ -358,7 +389,7 @@ static uint32_t freshEpochSeed()
     return seed ? seed : 1U;
 }
 
-// Hop of a slot at most two slots after the boundary snapshot
+// Hop of a slot at most four slots after the boundary snapshot
 static uint16_t hopOf(const EmlBoundary_s &b, uint32_t slot)
 {
     EmlSlotClock_s c = {b.slot, b.hop, hopCount};
@@ -372,14 +403,21 @@ static void prepareFor(uint32_t slot, uint16_t hop)
     alignas(4) uint8_t frame[EML_FRAME_SIZE_64];
     EmlTxTicket_s ticket;
     EmlBandMessage_s command;
-    const uint8_t missedAck = transport.pending() ? missedAckCount : 0;
-    const bool control = transport.active() && bandController.command(slot, linkQuality.lq(), linkQuality.samples(), missedAck, &command);
-    const bool ready = transport.prepare(slot, hop, frame, sizeof(frame), &ticket, control ? &command : nullptr);
+    const uint8_t missedAck = transport.pending() && transport.peerFlowControl() != EML_FLOW_CTRL_PAUSE ? missedAckCount : 0;
+    const bool shortFrame = physicalLength(slot) == EML_ACK_FRAME_SIZE;
+    bool control = false;
+    if (transport.active() && !shortFrame && emlTddAnchor(slot, kRole) && (slot & 7U) == (kRole == EML_COORDINATOR ? 0U : 3U))
+    {
+        control = bandController.command(slot, linkQuality.lq(), linkQuality.samples(), missedAck, &command);
+        if (!control && !bandController.busy())
+            control = tddController.command(slot, transport.queuedTx(), transport.flowControl(), transport.pending(), &command);
+    }
+    const bool ready = transport.prepare(slot, hop, frame, sizeof(frame), &ticket, control ? &command : nullptr, shortFrame);
     publishGeneration();
     if (!ready)
         return;
     const EmlRxContext_s context = {ticket.generation, slot, hop};
-    txMailbox.push(frame, kFrameSize, context, &ticket);
+    txMailbox.push(frame, shortFrame ? EML_ACK_FRAME_SIZE : kFrameSize, context, &ticket);
 }
 
 static void enterSearch(uint32_t now, bool countLoss)
@@ -391,6 +429,7 @@ static void enterSearch(uint32_t now, bool countLoss)
     macMode = MAC_SEARCH;
     txActive = false;
     Radio.SetFrequencyReg(syncFreq, SX12XX_Radio_All, false);
+    Radio.SetPacketLength(kFrameSize);
     Radio.RXnb();
     armRx(slotClock.slot, 0, 0, EML_DESC_SEARCH);
     EML_CRITICAL_EXIT();
@@ -425,7 +464,7 @@ static void acquire(const EmlRadioDescriptor_s &d)
     publishBoundary(a.clock_slot, a.clock_hop, a.first_boundary_us - slotUs);
 
     const EmlRxContext_s context = {d.context.generation, a.hello_slot, sync.hop_index};
-    const EmlReceiveResult_e result = transport.receive(d.bytes, d.length, context, emlNextOwnSlot(a.clock_slot, kRole));
+    const EmlReceiveResult_e result = transport.receive(d.bytes, d.length, context, nextOwn(a.clock_slot));
     publishGeneration();
     if (result != EML_RX_CONTROL)
         return;
@@ -436,10 +475,10 @@ static void acquire(const EmlRadioDescriptor_s &d)
     EML_CRITICAL_EXIT();
     lastHeardSlot = a.hello_slot;
     prepSlot = peerProcessedSlot = 0xFFFFFFFFUL;
-    linkQuality.reset(a.hello_slot >> 1);
-    linkQuality.received(a.hello_slot >> 1);
+    linkQuality.reset(a.hello_slot);
+    linkQuality.received(a.hello_slot);
 
-    if (emlOwnSlot(a.first_slot, kRole))
+    if (emlTddOwner(a.first_slot, macTddPlan) == kRole)
     {
         const EmlBoundary_s b = {a.clock_slot, a.clock_hop, 0};
         prepareFor(a.first_slot, hopOf(b, a.first_slot));
@@ -454,7 +493,7 @@ static void acquire(const EmlRadioDescriptor_s &d)
 #endif
     if ((int32_t)(a.first_boundary_us - resumeLeadUs - micros()) < 0)
     {
-        enterSearch(emlNextOwnSlot(a.clock_slot, kRole), false); // processed too late, wait for the next HELLO
+        enterSearch(nextOwn(a.clock_slot), false); // processed too late, wait for the next HELLO
         return;
     }
     while ((int32_t)(a.first_boundary_us - resumeLeadUs - micros()) > 0) {}
@@ -466,7 +505,9 @@ static void acquire(const EmlRadioDescriptor_s &d)
 
 static void trackPhase(const EmlRadioDescriptor_s &d)
 {
-    int32_t correction = emlPhaseCorrection(d.rx_us, d.slot_start_us, *profile);
+    EmlMacProfile_s receivedProfile = *profile;
+    receivedProfile.frame_size = d.length; // compact FSK ACK has its own exact ToA
+    int32_t correction = emlPhaseCorrection(d.rx_us, d.slot_start_us, receivedProfile);
     const int32_t limit = (int32_t)(slotUs / 4U);
     if (correction > limit) correction = limit;
     if (correction < -limit) correction = -limit;
@@ -489,7 +530,7 @@ static void handleRx(const EmlRadioDescriptor_s &d, uint32_t now)
     {
         // Only session/configuration/freshness-validated frames supervise the link.
         lastValidMs = millis();
-        linkQuality.received(d.context.slot >> 1);
+        linkQuality.received(d.context.slot);
         rssiAvgX16 = (int16_t)(rssiAvgX16 + ((int16_t)(d.rssi * 16) - rssiAvgX16) / 8);
         if (kRole == EML_RESPONDER)
         {
@@ -503,7 +544,10 @@ static void handleRx(const EmlRadioDescriptor_s &d, uint32_t now)
             if (emlFrameDecode(d.bytes, d.length, kFrameSize, &view) == EML_FRAME_OK &&
                 view.header.pkt_type == EML_PKT_TYPE_SYNC &&
                 emlBandMessageRead(view.payload, view.header.payload_len, &command))
-                bandController.receive(command, d.context.slot, lastValidMs);
+            {
+                if (command.op <= EML_BAND_STATUS) bandController.receive(command, d.context.slot, lastValidMs);
+                else tddController.receive(command, d.context.slot);
+            }
         }
     }
     publishGeneration();
@@ -562,9 +606,12 @@ static bool applyPhy()
     ok = ok && Radio.PayloadLength == kFrameSize;
 
     slotUs = profile->slot_us;
-    transportConfig = emlMacTransportConfig(kRole, emlDeriveLinkIds(UID, *profile, fhssRecord, true), *profile, hopCount);
+    useShortAck = EML_SHORT_ACK && emlIsFsk(*profile);
+    transportConfig = emlMacTransportConfig(kRole,
+        emlDeriveLinkIds(UID, *profile, fhssRecord, true, EML_ARQ_WINDOW, kAdaptive, useShortAck),
+        *profile, hopCount, EML_ARQ_WINDOW, kAdaptive, useShortAck);
     researchSlots = (uint16_t)(transportConfig.link_timeout_slots + 4U);
-    const uint32_t now = emlNextOwnSlot(slotClock.slot, kRole);
+    const uint32_t now = nextOwn(slotClock.slot);
     ok = ok && transport.begin(transportConfig, freshEpochSeed(), now);
     publishGeneration();
     if (!ok)
@@ -578,7 +625,7 @@ static bool applyPhy()
 
     hwTimer::updateInterval(profile->slot_us);
     prepSlot = peerProcessedSlot = 0xFFFFFFFFUL;
-    linkQuality.reset((slotClock.slot + 1U) >> 1);
+    linkQuality.reset(slotClock.slot + 1U);
     bandController.begin(kRole, macBand, bandSearch.mask(), millis());
     wasActive = false;
     lastValidMs = millis();
@@ -657,7 +704,7 @@ static void updatePhy()
     {
         foregroundBand = macBand;
         bandController.completed(foregroundBand, nowMs);
-        linkQuality.reset((boundarySlot + 1U) >> 1);
+        linkQuality.reset(boundarySlot + 1U);
         lastValidMs = nowMs;
     }
     const bool active = transport.active();
@@ -672,7 +719,7 @@ static void updatePhy()
     // to the ISR. Do not leave an armed negotiation stuck forever on the old band.
     const bool missedHandover = bandController.armed() && bandController.target() != macBand &&
         !bandSwitchArmed && (int32_t)(b.slot - bandController.switchSlot()) >= 0;
-    const bool emergency = missedHandover || (active && nowMs - lastValidMs >= EML_EMERGENCY_MS) || (wasActive && !active);
+    const bool emergency = missedHandover || (active && nowMs - lastValidMs >= emlTddEmergencyMs(*profile, kAdaptive)) || (wasActive && !active);
     wasActive = active;
     if (emergency)
     {
@@ -687,10 +734,13 @@ static void updatePhy()
         if (bandSearch.update(nowMs, held)) applyPhy();
         return;
     }
-    if (!transport.pending() || watchedSequence != transport.nextTxSequence())
-    { missedAckCount = 0; watchedSequence = transport.nextTxSequence(); }
-    bandController.consider(b.slot, nowMs, linkQuality.lq(), linkQuality.samples(),
-                            transport.pending() ? missedAckCount : 0);
+    // A receiver intentionally withholding ACK under UART backpressure is not
+    // evidence of RF degradation. Restart the retry watch once PAUSE is lifted.
+    if (!transport.pending() || transport.peerFlowControl() == EML_FLOW_CTRL_PAUSE ||
+        acknowledgedBytes != transport.stats().acknowledged_bytes)
+    { missedAckCount = 0; acknowledgedBytes = transport.stats().acknowledged_bytes; }
+    if (!tddController.negotiating())
+        bandController.consider(b.slot, nowMs, linkQuality.lq(), linkQuality.samples(), transport.pending() ? missedAckCount : 0);
     if (bandController.armed() && !bandSwitchArmed && bandController.target() != macBand)
     {
         const uint8_t target = bandController.target();
@@ -715,18 +765,19 @@ void emlBridgeLoop()
         return;
 
     EmlBoundary_s b = readBoundary();
-    uint32_t now = emlNextOwnSlot(b.slot, kRole);
+    uint32_t now = nextOwn(b.slot);
 
     // 1. TX reports first: an ACK in the following RX must find the DATA marked sent
     EmlTxTicket_s ticket;
     while (sentRing.pop(&ticket))
     {
-        if (!transport.sent(ticket, ticket.slot))
-            ++macStats.sent_unmatched;
+        const uint32_t retries = transport.stats().retransmitted;
+        if (!transport.sent(ticket, ticket.slot)) ++macStats.sent_unmatched;
+        else if (ticket.type == EML_PKT_TYPE_SYNC && ticket.phase >= EML_TDD_PROPOSE)
+            tddController.sent(ticket.phase, ticket.slot);
         else if (ticket.type == EML_PKT_TYPE_SYNC && ticket.phase >= EML_BAND_PROPOSE)
             bandController.sent(ticket.phase);
-        else if (ticket.type == EML_PKT_TYPE_DATA && missedAckCount < 255)
-            ++missedAckCount;
+        else if (transport.stats().retransmitted != retries && missedAckCount < 255) ++missedAckCount;
     }
 
     // 2. Received frames (acquisition can reload the clock)
@@ -735,7 +786,7 @@ void emlBridgeLoop()
     {
         handleRx(d, now);
         b = readBoundary();
-        now = emlNextOwnSlot(b.slot, kRole);
+        now = nextOwn(b.slot);
     }
 
     // 3. Timeouts, lock supervision
@@ -748,13 +799,21 @@ void emlBridgeLoop()
     if (macMode == MAC_LOCKED)
     {
         // one pair of grace so a frame still in flight is not counted as lost
-        linkQuality.finalizeBefore((b.slot >> 1) - 1U);
+        linkQuality.finalizeExpectedBefore(b.slot - 1U, [](uint32_t slot) { return emlTddOwner(slot, macTddPlan) != kRole; });
+    }
+    tddController.tick(b.slot, transport.queuedTx(), transport.flowControl(), transport.peerFlowControl(),
+                       emlMaxPayloadForFrameSize(kFrameSize), bandController.busy());
+    if (tddController.takeDirty())
+    {
+        EML_CRITICAL_ENTER();
+        macTddPlan = tddController.plan();
+        EML_CRITICAL_EXIT();
     }
     updatePhy();
     if (macMode == MAC_OFF)
         return;
     b = readBoundary();
-    now = emlNextOwnSlot(b.slot, kRole);
+    now = nextOwn(b.slot);
 
     // 4. Prepare the next own slot: early (stale ACK, covers a lost peer frame) and
     //    once more after the peer frame of the preceding slot was processed
@@ -800,12 +859,16 @@ bool emlBridgeActive() { return transport.active(); }
 const EmlTransportStats_s &emlBridgeTransportStats() { return transport.stats(); }
 const EmlUartStats_s &emlBridgeUartStats() { return uartStats; }
 const EmlMacStats_s &emlBridgeMacStats() { return macStats; }
+const EmlTddStats_s &emlBridgeTddStats() { return tddController.stats(); }
 
 EmlLinkStats_s emlBridgeLinkStats()
 {
     EmlLinkStats_s stats;
     stats.phy_profile = profile->phy_profile;
     stats.band = macBand;
+    stats.tdd_mode = emlTddMode(boundarySlot, macTddPlan);
+    stats.arq_window = EML_ARQ_WINDOW;
+    stats.in_flight = transport.inFlight();
     stats.pll_band_mask = bandSearch.mask();
     stats.lq = linkQuality.lq();
     stats.per = (uint8_t)(linkQuality.samples() ? 100U - stats.lq : 0U);

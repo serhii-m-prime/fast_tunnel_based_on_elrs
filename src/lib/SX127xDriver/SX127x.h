@@ -41,6 +41,7 @@ public:
     bool ProbePll(uint32_t freq, uint32_t timeoutUs = 5000);
     // Negative LoRa lock indication, after Config(): RX only, then Standby.
     bool ProbeLoraPll(uint32_t freq);
+    bool SetPacketLength(uint8_t length); // IRAM, FSK control anchors; no modem reconfiguration
 #endif
     volatile uint32_t FskFifoOverruns = 0;
 #endif

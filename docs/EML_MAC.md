@@ -1,8 +1,10 @@
-# EML MAC: PHY, симетричний TDD і інтеграція мосту (P4–P6)
+# EML MAC: PHY, TDD і інтеграція мосту (P4–P7)
 
 MAC зв'язує транспорт P3 ([EML_TRANSPORT.md](EML_TRANSPORT.md)) з радіо SX1276, апаратним таймером і FHSS. Чиста логіка (профілі, ToA, бюджет слота, годинник слотів/hop, захоплення, ID пари) — у [`eml_mac.h`](../src/lib/OTA/eml_mac.h), прошивкова частина — у [`rxtx_eml_bridge.cpp`](../src/src/rxtx_eml_bridge.cpp) з API [`eml_bridge.h`](../src/include/eml_bridge.h). MAC вмикається прапорцем `EML_BRIDGE`, який мають лише `HappyModel_ES900TX_Bridge` і `HappyModel_ES900RX_Bridge`. У цих збірках штатний RF-канал ELRS (RC/telemetry, ELRS sync, PFD, rate cycling, bind over the air) не працює; Wi-Fi recovery, кнопка, LED, конфігурація, керування потужністю та вентилятором лишаються.
 
 ES900TX — coordinator, ES900RX — responder (ролі §6 [протоколу](EML_PROTOCOL.md)). Поточні бенди, startup PLL, формат керування та аварійний пошук описано в [EML_MULTIBAND.md](EML_MULTIBAND.md).
+
+P7 додає [адаптивний TDD та ARQ-вікно](EML_ADAPTIVE_TDD.md): типово W=4, 1:1/3:1/1:3 із lease, детерміновані короткі FSK ACK. Таблиця симетричного TDD нижче описує базовий режим; тривалість слотів і FHSS-крок не змінюються. Для default adaptive `max_frame_age_slots=7`, `quiet_slots=9`; повні часові бюджети й фізичні обмеження — у новому описі.
 
 ## 1. PHY-профіль (P4.2)
 
@@ -71,6 +73,8 @@ ToA для кожної довжини 1–64 перевіряється в `tes
 | `link_timeout_slots` | 1500 | 85 | 142 |
 | Повторний пошук responder без ACTIVE | link + 4 слоти | 89 | 146 |
 
+Для P7 adaptive замість 3/5 використовуються 7/9 слотів age/quiet: наступний власний слот може бути на 4 слоти попереду. Handshake/link timeout не змінено.
+
 ## 5. Rendezvous, захоплення й утримання (P4.5)
 
 **Пошук.** Responder без прив'язки зупиняє таймер і слухає sync channel ELRS (`FHSSgetInitialFreq()`). Цей канал стоїть на початку кожного блоку з 60 hop, тож coordinator, який передає HELLO в кожному власному слоті, буває на ньому раз на 120 слотів (2,136 с для LoRa N=64, 1,272 с для N=32). Бенд та PHY обирає карусель P6. Дескриптори пошуку мають прапорець `EML_DESC_SEARCH`. Захоплення приймає лише валідний HELLO з очікуваними peer/receiver/configuration ID, `hop_index` у межах таблиці й `FHSSsequence[hop] == sync_channel`.
@@ -81,15 +85,15 @@ ToA для кожної довжини 1–64 перевіряється в `tes
 
 **Keepalive.** Транспорт формує KEEPALIVE у кожному власному слоті, де немає DATA/Sync, тож обидва напрямки щопари несуть ACK/flow control і фазову опору.
 
-**Втрати.** Обидві сторони продовжують рахувати слоти й hop без приймання. У поточному Bridge P6 після ≥150 мс без валідних кадрів в ACTIVE починається emergency search нової сесії; коротші паузи зберігають ARQ. Під час незавершеного handshake залишаються transport timeout та `link_timeout + 4` для lock responder. Межі втрати RAM-даних при reconnect і тривалість пошуку — [EML_MULTIBAND.md](EML_MULTIBAND.md).
+**Втрати.** Обидві сторони продовжують рахувати слоти й hop без приймання. Після P7 adaptive поріг emergency для LoRa64 — 231 мс (щонайменше три peer-можливості), для інших робочих профілів — 150 мс. Коротші паузи зберігають ARQ. Під час незавершеного handshake залишаються transport timeout та `link_timeout + 4` для lock responder. Межі втрати RAM-даних при reconnect і тривалість пошуку — [EML_MULTIBAND.md](EML_MULTIBAND.md).
 
 ## 6. ISR/foreground-контракт
 
 | Подія | Контекст | Дія |
 | --- | --- | --- |
 | Межа власного слота | timer ISR (IRAM) | забрати з TX mailbox найновіший дескриптор саме цього слота **і** поточної generation, частота hop, `TXnb`, ticket у `sentRing`; без кадра coordinator вмикає RX |
-| Межа слота peer | timer ISR | responder: частота нового hop, RX, arm контексту `{generation, slot, hop, start_us}`; coordinator уточнює `start_us` |
-| TX done | DIO ISR | coordinator: RX на тому ж hop, arm наступного слота |
+| Межа слота peer | timer ISR | обидві ролі: частота hop, відома фізична довжина, RX, arm `{generation, slot, hop, start_us}` або уточнення вже озброєного прийому |
+| TX done | DIO ISR | обидві ролі: якщо наступний слот належить peer, завчасно поставити його hop/довжину, RX та arm; перед наступним власним слотом лишитися в Standby |
 | RX done | DIO ISR | один кадр на armed слот (пошук приймає всі), копія ≤64 B у RX mailbox із контекстом, `rx_us`, `slot_start_us` |
 | `emlBridgeLoop()` | foreground | 1) усі `sent()` з `sentRing`; 2) RX mailbox → `receive()` / захоплення / фаза; 3) `tick()`, нагляд за lock; 4) `prepare()` наступного власного слота; 5) `connectionState` |
 
@@ -116,7 +120,7 @@ ToA для кожної довжини 1–64 перевіряється в `tes
 
 - Bind over the air не підтримується: пара визначається binding phrase. Після P6.0 Bridge не реєструє callback повітряного bind.
 - Dynamic Power не працює (потрібні EML-метрики, P8.3–P8.4): TX використовує фіксовану потужність із конфігурації, вентилятор вмикається за порогом від неї (THERMAL device).
-- Rate/TLM-налаштування ELRS не впливають на EML. N і `EML_PHY_MODE` задаються під час збірки.
+- Rate/TLM-налаштування ELRS не впливають на EML. N, `EML_PHY_MODE`, `EML_ARQ_WINDOW`, `EML_ADAPTIVE_TDD` та `EML_SHORT_ACK` задаються під час збірки.
 - Затримки §2 оцінені, а не виміряні; PER, latency, throughput, тривала стабільність і фазова прив'язка на реальних SX1276 — P4.7.
 
 ## 10. FSK/GFSK і вибір PHY (P5.1–P5.5)
@@ -163,7 +167,7 @@ N = 64 займає FIFO повністю, тож обслуговувати FIF
 ### 10.3. Метрики й вибір PHY (P5.5)
 
 - **RSSI:** LoRa — `PktRssiValue`, FSK — `RegRssiValue`, узятий одразу після PayloadReady (не латчиться, тому це оцінка кінця кадра). SNR у FSK немає.
-- **LQ/PER:** `EmlLinkQuality` рахує кадри peer, які пройшли перевірки транспорту, за останні 100 пар слотів (PER = 100 − LQ), незалежно від PHY; `emlBridgeLinkStats()` повертає PHY, поточний бенд, PLL-маску, LQ, PER, середній RSSI і `FskFifoOverruns`.
+- **LQ/PER:** `EmlLinkQuality` рахує кадри peer, які пройшли перевірки транспорту, за останні 100 очікуваних peer TX-можливостей (PER = 100 − LQ), незалежно від PHY. Це враховує квоту P7 1/4. `emlBridgeLinkStats()` повертає PHY, бенд, PLL-маску, TDD mode, W/in-flight, LQ, PER, середній RSSI і `FskFifoOverruns`.
 - **Режим:** `EML_PHY_MODE` 0 — лише LoRa, 1 — лише FSK, 2 (типово) — FSK з fallback на LoRa. N і режим мають збігатися на обох модулях; кожен PHY має власний `configuration_id`.
 - **Узгоджений вибір після P6:** карусель `(PHY,band)` замінила окремий PHY-selector. Coordinator проходить бенди 0→1→2→3 кожного PHY, responder має довше вікно, розраховане за повним циклом coordinator. PLL-маски можуть відрізнятися. Формули, реальні вікна й межі відновлення — [EML_MULTIBAND.md](EML_MULTIBAND.md).
 - **Повернення:** плановий перехід на вищий бенд після 30 с доброї якості зберігає сесію. Зміна PHY відбувається лише під час пошуку нової сесії.
@@ -173,7 +177,7 @@ N = 64 займає FIFO повністю, тож обслуговувати FIF
 
 | Bitrate | Статус | Причина |
 | --- | --- | --- |
-| 300 кбіт/с | експеримент, `-DEML_FSK_EXPERIMENTAL_300K`, лише N=64 | межа датащиту; h = 0,5 потребує Fdev ≥ 75 кГц, лишаючи ±25 кГц на відхилення; ToA 2 080 мкс, слот 3 700 мкс |
+| 300 кбіт/с | експеримент, `-DEML_FSK_EXPERIMENTAL_300K`, лише N=64 | межа датащиту; h = 0,5 потребує Fdev ≥ 75 кГц, лишаючи ±25 кГц на відхилення; ToA 2 081 мкс з урахуванням RegBitrateFrac, слот 3 700 мкс |
 | 500 кбіт/с | недосяжно в межах специфікації | понад 300 кбіт/с; h ≥ 0,5 дає Fdev + BR/2 ≥ 375 кГц > 250 кГц фільтра |
 | 1000 кбіт/с | недосяжно в межах специфікації | Fdev + BR/2 ≥ 750 кГц; також понад межу bitrate |
 

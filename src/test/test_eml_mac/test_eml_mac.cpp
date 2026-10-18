@@ -68,7 +68,7 @@ void test_fsk_toa_and_fifo_fit()
 {
     TEST_ASSERT_EQUAL_UINT32(2496, emlProfileToaUs(EML_PROFILE_FSK64)); // (10 + 4 + 64) B * 32 us
     TEST_ASSERT_EQUAL_UINT32(1472, emlProfileToaUs(EML_PROFILE_FSK32));
-    TEST_ASSERT_EQUAL_UINT32(2080, emlProfileToaUs(EML_PROFILE_FSK64_300K));
+    TEST_ASSERT_EQUAL_UINT32(2081, emlProfileToaUs(EML_PROFILE_FSK64_300K)); // programmed fractional divider
     TEST_ASSERT_EQUAL_UINT32(2560, emlFskToaUs(250000, 10, 4, 64, 2)); // a hardware CRC would cost 64 us
     for (uint16_t n = 1; n <= 64; n++)
         TEST_ASSERT_EQUAL_UINT32((10U + 4U + n) * 32U, emlFskToaUs(250000, 10, 4, n, 0));

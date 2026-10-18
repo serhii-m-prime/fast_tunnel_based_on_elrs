@@ -29,12 +29,13 @@ public:
         used_ += length;
         return true;
     }
-    size_t peek(uint8_t *out, size_t limit) const
+    size_t peek(uint8_t *out, size_t limit, size_t offset = 0) const
     {
-        if (!out) return 0;
-        const size_t count = limit < used_ ? limit : used_;
-        const size_t first = count < Capacity - head_ ? count : Capacity - head_;
-        if (first) memcpy(out, bytes_ + head_, first);
+        if (!out || offset > used_) return 0;
+        const size_t head = (head_ + offset) % Capacity;
+        const size_t count = limit < used_ - offset ? limit : used_ - offset;
+        const size_t first = count < Capacity - head ? count : Capacity - head;
+        if (first) memcpy(out, bytes_ + head, first);
         if (count > first) memcpy(out + first, bytes_, count - first);
         return count;
     }

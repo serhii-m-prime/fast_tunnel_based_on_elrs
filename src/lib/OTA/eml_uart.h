@@ -54,12 +54,12 @@ size_t emlDrainSerial(Port &port, Queue &queue, EmlUartStats_s &stats, size_t bu
 }
 
 // Adapts the foreground transport to the same batching helpers as legacy FIFO.
-template <size_t Capacity>
+template <size_t Capacity, uint8_t WindowSize = 1>
 class EmlTransportUart
 {
-    EmlTransport<Capacity> &transport_;
+    EmlTransport<Capacity, WindowSize> &transport_;
 public:
-    explicit EmlTransportUart(EmlTransport<Capacity> &transport) : transport_(transport) {}
+    explicit EmlTransportUart(EmlTransport<Capacity, WindowSize> &transport) : transport_(transport) {}
     void lock() {} void unlock() {}
     size_t free() const { return transport_.uartSpace(); }
     size_t size() const { return transport_.queuedRx(); }
