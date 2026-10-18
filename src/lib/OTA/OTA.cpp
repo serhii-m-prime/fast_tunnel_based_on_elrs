@@ -11,6 +11,7 @@
 
 static_assert(sizeof(OTA_Packet4_s) == OTA4_PACKET_SIZE, "OTA4 packet struct is invalid!");
 static_assert(sizeof(OTA_Packet8_s) == OTA8_PACKET_SIZE, "OTA8 packet struct is invalid!");
+static_assert(sizeof(OTA_Packet_s) == OTA_MAX_PACKET_SIZE, "OTA packet buffer is invalid!");
 
 uint8_t UID[UID_LEN] {};  // "bind phrase" ID
 elrsLinkStatistics_t linkStats {};

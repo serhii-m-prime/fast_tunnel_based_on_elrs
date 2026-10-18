@@ -70,7 +70,13 @@ public:
     bool (*RXdoneCallback)(rx_status crcFail); //function pointer for callback
     void (*TXdoneCallback)(); //function pointer for callback
 
+    // Bridge builds receive fixed-length EML frames of up to 64 bytes (EML_FRAME_SIZE_64);
+    // other targets keep the stock ELRS buffer for 8/13-byte OTA packets.
+    #if defined(USE_AIRPORT_AT_BAUD)
+    #define RXBuffSize 64
+    #else
     #define RXBuffSize 16
+    #endif
     WORD_ALIGNED_ATTR uint8_t RXdataBuffer[RXBuffSize];
     WORD_ALIGNED_ATTR uint8_t RXdataBufferSecond[RXBuffSize];
 

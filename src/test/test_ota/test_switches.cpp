@@ -902,6 +902,20 @@ void test_eml_crc16_single_bit_errors()
     }
 }
 
+// OTA_Packet_s.raw spans the whole radio packet buffer; `= {0}` used by tx/rx_main zeroes all of it
+void test_ota_packet_buffer_layout()
+{
+    TEST_ASSERT_EQUAL(OTA_MAX_PACKET_SIZE, sizeof(OTA_Packet_s));
+    TEST_ASSERT_TRUE(sizeof(OTA_Packet_s) >= OTA8_PACKET_SIZE);
+    OTA_Packet_s packet;
+    memset(&packet, 0xA5, sizeof(packet));
+    packet = OTA_Packet_s{0};
+    for (size_t i = 0; i < sizeof(packet); i++) TEST_ASSERT_EQUAL_HEX8(0, packet.raw[i]);
+    packet.full.crc = 0x1234;
+    TEST_ASSERT_EQUAL_HEX8(0x34, packet.raw[OTA8_CRC_CALC_LEN]);
+    TEST_ASSERT_EQUAL_PTR(packet.raw, &packet.std);
+}
+
 void test_airport_large_queues_and_malformed_count()
 {
     FIFO<4096> input;
@@ -973,6 +987,7 @@ int main(int argc, char **argv)
     RUN_TEST(test_eml_crc16_frame_vectors);
     RUN_TEST(test_eml_crc16_single_bit_errors);
     RUN_TEST(test_airport_large_queues_and_malformed_count);
+    RUN_TEST(test_ota_packet_buffer_layout);
 
     UNITY_END();
 

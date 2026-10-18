@@ -116,7 +116,7 @@ ELRS_UNIFIED_CONFIG=happymodel.rx_900.es900 \
 
 Залежності: етапи 1–3; початкова інтеграція може передувати апаратному P1.7. Результат: перший працездатний EML-міст на LoRa.
 
-- [ ] **P4.1** Розширити залежні RX/TX-буфери, FIFO/SPI-операції та перевірки довжини до 32/64 байтів; обмежити зміни Bridge-режимом там, де це потрібно для сумісності інших таргетів.
+- [x] **P4.1** Розширити залежні RX/TX-буфери, FIFO/SPI-операції та перевірки довжини до 32/64 байтів; обмежити зміни Bridge-режимом там, де це потрібно для сумісності інших таргетів.
 - [ ] **P4.2** Додати LoRa BW500/SF6/CR4/5 із заздалегідь відомою фізичною довжиною пакета; зберегти SF6 implicit header і BW500 errata.
 - [ ] **P4.3** Розрахувати ToA для всіх довжин і профілів із точними preamble/header/CRC параметрами; додати SPI, synth/turnaround, обробку IRQ й запас перед встановленням `interval`.
 - [ ] **P4.4** Реалізувати симетричний TDD: один слот TX → RX, один слот RX → TX; явно відокремити цей розклад від позначень telemetry ratio у штатному ELRS.
@@ -165,9 +165,9 @@ ELRS_UNIFIED_CONFIG=happymodel.rx_900.es900 \
 - [ ] **P7.4** За вимірюваннями обґрунтувати розширення ARQ-вікна; при Selective Repeat із 3-бітними sequence numbers обмежити вікно чотирма кадрами та перевірити неоднозначності wraparound.
 - [ ] **P7.5** Перевірити однобічне, симетричне й асиметричне навантаження, короткі інтерактивні повідомлення та великі потоки; порівняти throughput, p50/p95/p99 затримки й кількість повторів.
 
-## Етап 8. Потужність, Dynamic Power і охолодження
+## Етап 8. Потужність, Dynamic Power, охолодження та конфігураційний WebUI
 
-Залежності: P1.1–P1.6 та етап 4; перевірки у високому діапазоні — після етапу 6. Результат: керовані й виміряні режими потужності для робочих PHY/частот.
+Залежності: етапи 1–7. Результат: керовані й виміряні режими потужності для робочих PHY/частот, а також легкий WebUI з повним набором налаштувань форку.
 
 - [ ] **P8.1** Перевірити таблиці ES900TX для 10/25/50/100/250/500/1000 мВт, APC/DAC та обмеження профілю; не ототожнювати значення enum із виміряною RF-потужністю.
 - [ ] **P8.2** Реалізувати/перевірити 100 мВт PA_BOOST на ES900RX: PA_CONFIG, PA_DAC, OCP і перемикання TX/RX згідно з режимом SX1276.
@@ -175,6 +175,13 @@ ELRS_UNIFIED_CONFIG=happymodel.rx_900.es900 \
 - [ ] **P8.4** Інтегрувати Dynamic Power з гістерезисом, обмеженнями й визначеною поведінкою при втраті зворотного зв'язку.
 - [ ] **P8.5** Перевірити GPIO17 вентилятора TX, увімкнення від 250 мВт, мінімальний час роботи й налаштування порога; використовувати вимірювання температури лише якщо відповідний датчик реально доступний.
 - [ ] **P8.6** Виміряти вихідну потужність, струм живлення й нагрівання на всіх підтримуваних рівнях та робочих частотах; зафіксувати обмеження RF-тракту й охолодження.
+- [ ] **P8.7** Розробити легкий мінімалістичний Wi-Fi WebUI (чистий ванільний HTML5/CSS/JS без важких фреймворків Vite/Vue) зі збереженням 100% функціоналу та інтеграцією параметрів форку:
+  - **OTA та сервіс:** прошивка файлу `.bin` через `/update` з індикатором прогресу, збереження параметрів у LittleFS `/options.json`, перезавантаження (`/reboot`).
+  - **Радіо та бенди:** вибір стартового Default Band (`Band 0..3`), перемикач Adaptive Fallback (On/Off), налаштування порогу деградації LQ, вибір робочого PHY-профілю (GFSK 250k, GFSK 500k, LoRa SF6).
+  - **UART та транспорт:** швидкість порту (57600..460800 бод), апаратна інверсія сигналу (Normal / Inverted для прямого підключення SBUS), режим TDD-слотів (Symmetric 1:1 / Adaptive Dynamic).
+  - **Потужність та охолодження:** вибір фіксованої потужності (10..1000 мВт), активація Dynamic Power, поріг увімкнення кулера.
+  - **Live Monitor (діагностика без перезавантаження):** динамічне відображення активного бенду/частоти, RSSI, SNR, Link Quality (LQ %), лічильників байтів UART Uplink/Downlink.
+  - **Оптимізація пам'яті:** зменшення розміру бінарного образу WebContent з ~50 КБ до <5 КБ gzip для економії Flash і миттєвого завантаження інтерфейсу на ESP8285.
 
 ## Етап 9. Приймальні випробування та документація
 
@@ -215,6 +222,7 @@ ELRS_UNIFIED_CONFIG=happymodel.rx_900.es900 \
 | 2026-10-18 | P3.7 | Додано bounded read/write helper та `EmlTransportUart` adapter, застосовано batching до поточного TX/RX AirPort. Read враховує free/available, write — availableForWrite і maxBytesToSend; після partial write видаляються лише фактично записані байти. Serial I/O поза critical section, disconnected discard обмежений однією порцією. Лічильники read/written/refused/stalls/discard; RTS/CTS не налаштовано, XON/XOFF у raw потік не додається, хост має стримувати навантаження. Native partial-write/full-queue/pause перевірки — PASS. |
 | 2026-10-18 | P3.8 | Після звичайної успішної компіляції ELF audit виявив flash-інстанціації шаблонних ISR helper попри section attribute. Короткі pack/unpack/FIFO try/lock/size примусово вбудовано в IRAM radio callers; обидві збірки й native повторено. MCU probe з фактичними PIO flags та -fno-lto підтвердив IRAM wrapper/leaf, DRAM data, відсутність heap/log/libatomic calls; перевірено linked DIO/radio/timer ISR й ESP8285 UART ISR/FIFO copy. ESP8285 lock відновлює попередній PS. ESP32 SDK UART ISR залишається flash із intr_alloc_flags=0 і маскується під час cache-off; radio ISR його не викликає. CRC/Sync/ARQ/UART працюють foreground, mailbox ISR copy <=64 B. RF MAC wiring і часові вимірювання — P4; після інтеграції потрібен повторний audit. |
 | 2026-10-18 | P3.9 | Додано 14 transport-тестів: обидва N, втрати кожної Sync-фази/data/ACK, CRC, 4096/3073-байтові бінарні потоки в обох напрямках із шумом/паузами UART, overflow/PAUSE, дублікат, sequence wrap, 16/32-bit slot wrap, generation/capture freshness, reboot обох сторін і probe timeout, непереданий TX/неправильний ACK, partial UART, mailbox full/stamp. Вихід у межах сесії збігається побайтово й одноразово; на reset хвіст відкидається за специфікацією. Повний native — 197/197 (16 suites), transport ASan/UBSan зі строгим C++11 — 14/14; фінальні TX/RX, конфігурації, RAM/IRAM й ISR audit — PASS. Фізичних RF-тестів не було. |
+| 2026-10-18 | P4.1 | У Bridge (`USE_AIRPORT_AT_BAUD`) `RXBuffSize` радіо збільшено 16→64 B, `OTA_Packet_s` отримав перший член `raw[OTA_MAX_PACKET_SIZE]` (64 B у Bridge, 13 B інакше), тож TX-буфери tx/rx_main вміщують 64-байтовий EML-кадр, а `= {0}` обнуляє весь буфер. `static_assert` у `common.cpp`/`OTA.cpp` зв'язують розміри OTA- і радіобуфера. `SX127xDriver::Config` відхиляє `PayloadLength` 0 або >`RXBuffSize` із ERRLN, зберігаючи попереднє значення. SPIEx передає ≤64 B за транзакцію (16 слів W0–W15 на ESP32/ESP8266), тож 64 B + адреса переповнили б апаратний буфер: новий `SX127xSpiBurst.h` ділить burst на транзакції ≤63 B даних (RegFifo лишає адресу 0x00, бо RegFifoAddrPtr інкрементується в радіо; інші регістри — reg+offset), VLA на стеку замінено фіксованим 64-байтовим буфером. 8/13-байтові пакети й FRF лишаються однією транзакцією; поведінка штатних SX127x-таргетів не змінюється. Новий `test_sx127x_spi` (6 тестів, модель FIFO SX127x) перевіряє всі довжини 0–255 з wrap адреси FIFO, розбиття 64→64+2 B, межу транзакції та вирівнювання; `test_ota` — розмір/обнулення `OTA_Packet_s`. Native — 204/204 (17 suites). Обидва Bridge-таргети та штатний `Unified_ESP8285_900_RX_via_UART` (FCC915) — SUCCESS. ELF: HAL burst read/write, `RXnbISR`, `TXnb`, `CheckForSecondPacket`, `SPIExClass::_transfer` в IRAM, helper вбудовані; RX копіює через ROM `memcpy`, TX — inline, `__stack_chk_fail` в IRAM. Чинні ModParams, PHY, FHSS та interval не змінено (8/13 B), ToA без змін; 64-байтове SPI-читання при 10 МГц ≈53 µs у DIO ISR проти ≈11 µs для 13 B — врахувати в P4.3. 32/64-байтові профілі — P4.2, на реальному SX1276 розбиття не перевірялося (P4.7). |
 
 Контрольні збірки P2.1:
 
@@ -304,3 +312,22 @@ export PLATFORMIO_BUILD_DIR="$PWD/.venv/build-p3"
 Чинні фізичні OTA-пакети залишаються 8/13 B; PHY/FHSS/interval не змінено, ISR-порція legacy AirPort лишається 5/10 B. Нові EML frames/ARQ протестовано foreground-моделюванням; RF-підключення, апаратний generation/quiet/IRQ drain і ToA/ISR duration — P4.1–P4.6. Апаратного вимірювання PER/throughput, довгих cache-off UART overrun або thermal behavior не проводилося.
 
 Артефакти: `.venv/artifacts/p3/es900tx/`, `.venv/artifacts/p3/es900rx/` (.bin/.elf/hardware.json/options.json/SHA256), `.venv/artifacts/p3/build-manifest.json`, `verified-source-sha256.json`. ISR probe, disassembly, compilation database та `verify_probe.py` збережено в тій самій теці. Логи: `.venv/build-logs/p3-native.log`, `p3-sanitized.log`, `p3-es900tx.log`, `p3-es900rx.log`, `p3-es900tx-isr-audit.log`, `p3-es900rx-isr-audit.log`. Логи до виправлення inline — `p3-es900tx-pre-inline.log` / `p3-es900rx-pre-inline.log`. Ці локальні артефакти не входять у Git.
+
+Контрольні перевірки P4.1 (2026-10-18):
+
+```bash
+export PLATFORMIO_CORE_DIR="$PWD/.venv/platformio"
+.venv/bin/pio test --project-dir src -e native
+export PLATFORMIO_BUILD_DIR="$PWD/.venv/build-p4.1"
+.venv/bin/pio run --project-dir src -e HappyModel_ES900TX_Bridge -j 4
+.venv/bin/pio run --project-dir src -e HappyModel_ES900RX_Bridge -j 4
+```
+
+Зовнішні `PLATFORMIO_BUILD_FLAGS` / `ELRS_UNIFIED_CONFIG` для Bridge вимкнено. Сумісність: `Unified_ESP8285_900_RX_via_UART` з `-DRegulatory_Domain_FCC_915` та `happymodel.rx_900.es900` в окремому `.venv/build-p4.1-stock` — SUCCESS (RAM 50 112, Flash 560 730).
+
+| Таргет | RAM, байтів | Flash, байтів | IRAM, байтів | Вільна IRAM, байтів |
+| --- | ---: | ---: | ---: | ---: |
+| `HappyModel_ES900TX_Bridge` | 78 500 / 327 680 | 1 625 713 / 1 966 080 | 125 924 / 131 072 | 5 148 |
+| `HappyModel_ES900RX_Bridge` | 52 128 / 81 920 | 561 030 / 991 216 | 38 903 / 49 152 | 10 249 |
+
+Порівняно з P3: TX RAM +96 B (два радіобуфери по +48), Flash +168, IRAM +80; RX RAM +144, Flash +820, IRAM +188. IRAM виміряно за `_iram_end - _iram_start` на TX та `_text_end - _text_start` на RX. Логи: `.venv/build-logs/p4.1-es900tx.log`, `p4.1-es900rx.log`, `p4.1-stock-es900rx.log`; native — у scratchpad сесії. Апаратні випробування не проводилися.

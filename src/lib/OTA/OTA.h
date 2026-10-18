@@ -18,6 +18,12 @@
 #define OTA4_CRC_CALC_LEN    offsetof(OTA_Packet4_s, crcLow)
 #define OTA8_PACKET_SIZE     13U
 #define OTA8_CRC_CALC_LEN    offsetof(OTA_Packet8_s, crc)
+// Largest radio packet an OTA_Packet_s buffer holds: Bridge builds carry 32/64-byte EML frames
+#if defined(USE_AIRPORT_AT_BAUD)
+#define OTA_MAX_PACKET_SIZE  EML_FRAME_SIZE_64
+#else
+#define OTA_MAX_PACKET_SIZE  OTA8_PACKET_SIZE
+#endif
 
 // Packet header types
 #define PACKET_TYPE_DATA        0b01
@@ -164,6 +170,8 @@ typedef struct {
 
 typedef struct {
     union {
+        // First so that `= {0}` zeroes the whole buffer, including EML padding
+        uint8_t raw[OTA_MAX_PACKET_SIZE];
         OTA_Packet4_s std;
         OTA_Packet8_s full;
     };

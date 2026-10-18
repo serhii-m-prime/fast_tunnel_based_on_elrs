@@ -6,6 +6,13 @@
 #include "SX127xDriver.h"
 SX127xDriver Radio;
 
+// TXnb() sends PayloadLength (<= RXBuffSize) bytes from an OTA_Packet_s and the RX path
+// casts RXdataBuffer to OTA_Packet_s, so both buffers must cover the largest packet
+static_assert(sizeof(OTA_Packet_s) >= OTA_MAX_PACKET_SIZE && RXBuffSize >= OTA_MAX_PACKET_SIZE, "Radio buffers are smaller than an OTA packet");
+#if defined(USE_AIRPORT_AT_BAUD)
+static_assert(sizeof(OTA_Packet_s) == RXBuffSize, "Bridge OTA packet buffer must match the radio buffer");
+#endif
+
 expresslrs_mod_settings_s ExpressLRS_AirRateConfig[RATE_MAX] = {
     {0, RadioBandMod::Combined::LORA_900, RATE_LORA_900_200HZ,     SX127x_BW_500_00_KHZ, SX127x_SF_6, SX127x_CR_4_7,  8, TLM_RATIO_1_64, 4,  5000, OTA4_PACKET_SIZE, 1},
     {1, RadioBandMod::Combined::LORA_900, RATE_LORA_900_100HZ_8CH, SX127x_BW_500_00_KHZ, SX127x_SF_6, SX127x_CR_4_8,  8, TLM_RATIO_1_32, 4, 10000, OTA8_PACKET_SIZE, 1},

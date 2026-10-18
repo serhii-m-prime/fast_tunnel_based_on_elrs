@@ -2,6 +2,7 @@
 
 #include "SX127xHal.h"
 #include "SX127xRegs.h"
+#include "SX127xSpiBurst.h"
 #include "logging.h"
 #include <SPIEx.h>
 
@@ -106,12 +107,7 @@ uint8_t ICACHE_RAM_ATTR SX127xHal::readRegister(uint8_t reg, SX12XX_Radio_Number
 
 void ICACHE_RAM_ATTR SX127xHal::readRegister(uint8_t reg, uint8_t *data, uint8_t numBytes, SX12XX_Radio_Number_t radioNumber)
 {
-    WORD_ALIGNED_ATTR uint8_t buf[WORD_PADDED(numBytes + 1)];
-    buf[0] = reg | SPI_READ;
-
-    SPIEx.read(radioNumber, buf, numBytes + 1);
-
-    memcpy(data, buf + 1, numBytes);
+    sx127xSpiBurstRead(SPIEx, radioNumber, reg, data, numBytes);
 }
 
 void ICACHE_RAM_ATTR SX127xHal::writeRegisterBits(uint8_t reg, uint8_t value, uint8_t mask, SX12XX_Radio_Number_t radioNumber)
@@ -138,11 +134,7 @@ void ICACHE_RAM_ATTR SX127xHal::writeRegister(uint8_t reg, uint8_t data, SX12XX_
 
 void ICACHE_RAM_ATTR SX127xHal::writeRegister(uint8_t reg, uint8_t *data, uint8_t numBytes, SX12XX_Radio_Number_t radioNumber)
 {
-    WORD_ALIGNED_ATTR uint8_t buf[WORD_PADDED(numBytes + 1)];
-    buf[0] = reg | SPI_WRITE;
-    memcpy(buf + 1, data, numBytes);
-
-    SPIEx.write(radioNumber, buf, numBytes + 1);
+    sx127xSpiBurstWrite(SPIEx, radioNumber, reg, data, numBytes);
 }
 
 void ICACHE_RAM_ATTR SX127xHal::dioISR_1()

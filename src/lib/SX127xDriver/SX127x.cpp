@@ -572,7 +572,16 @@ void SX127xDriver::Config(uint8_t bw, uint8_t sf, uint8_t cr, uint32_t freq, uin
 
 void SX127xDriver::Config(uint8_t bw, uint8_t sf, uint8_t cr, uint32_t freq, uint8_t preambleLen, uint8_t syncWord, bool InvertIQ, uint8_t _PayloadLength)
 {
-  PayloadLength = _PayloadLength;
+  // TXnb/RXnbISR move exactly PayloadLength bytes between the FIFO and RXdataBuffer or the
+  // caller's OTA_Packet_s, so a length outside the buffers is refused and the last valid one kept
+  if (_PayloadLength == 0 || _PayloadLength > RXBuffSize)
+  {
+    ERRLN("SX127x payload length %u exceeds %u", _PayloadLength, RXBuffSize);
+  }
+  else
+  {
+    PayloadLength = _PayloadLength;
+  }
   ConfigLoraDefaults();
   SetPreambleLength(preambleLen);
   SetSpreadingFactor((SX127x_SpreadingFactor)sf);
