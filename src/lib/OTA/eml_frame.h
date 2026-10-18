@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /**
- * EML (ExpressLRS Modified Link) Frame Header Specification (P2.1)
+ * EML (ExpressLRS Modified Link) header and fixed frame layout (P2.1-P2.2)
  *
  * Explicit byte-level encoding independent of C/C++ compiler bitfield layout
  * and target endianness.
@@ -29,6 +29,11 @@
 #define EML_FRAME_SIZE_32           32U
 #define EML_FRAME_SIZE_64           64U
 
+#define EML_PAYLOAD_OFFSET          EML_HEADER_SIZE
+#define EML_CRC_OFFSET_32           (EML_FRAME_SIZE_32 - EML_CRC_SIZE)
+#define EML_CRC_OFFSET_64           (EML_FRAME_SIZE_64 - EML_CRC_SIZE)
+#define EML_PADDING_VALUE           0x00U
+
 #define EML_MAX_PAYLOAD_LEN_32      (EML_FRAME_SIZE_32 - EML_OVERHEAD_SIZE) // 28 bytes
 #define EML_MAX_PAYLOAD_LEN_64      (EML_FRAME_SIZE_64 - EML_OVERHEAD_SIZE) // 60 bytes
 #define EML_MAX_PAYLOAD_LEN         EML_MAX_PAYLOAD_LEN_64                  // 60 bytes ceiling
@@ -51,6 +56,37 @@
 #define EML_HDR_B1_PAYLOAD_LEN_MASK  0x3FU
 #define EML_HDR_B1_FLOW_CTRL_SHIFT   6U
 #define EML_HDR_B1_FLOW_CTRL_MASK    0x03U
+
+/**
+ * Fixed wire storage: header | meaningful payload | zero padding | CRC16.
+ * Only the first payload_len bytes of payload are meaningful; the rest must
+ * be EML_PADDING_VALUE. CRC always occupies the final two bytes, independently
+ * of payload_len. All fields are byte arrays, so no packed attribute or native
+ * integer endianness is involved. CRC parameters/byte order belong to P2.3.
+ * This defines storage only; frame encoding/validation belongs to P2.6.
+ */
+template <size_t FrameSize>
+struct EmlFrame_s
+{
+    static_assert(FrameSize == EML_FRAME_SIZE_32 || FrameSize == EML_FRAME_SIZE_64,
+                  "EML frames must be exactly 32 or 64 bytes");
+
+    uint8_t header[EML_HEADER_SIZE];
+    uint8_t payload[FrameSize - EML_OVERHEAD_SIZE]; // meaningful bytes followed by padding
+    uint8_t crc[EML_CRC_SIZE];
+};
+
+using EmlFrame32_s = EmlFrame_s<EML_FRAME_SIZE_32>;
+using EmlFrame64_s = EmlFrame_s<EML_FRAME_SIZE_64>;
+
+static_assert(sizeof(EmlFrame32_s) == 32U, "EML32 wire size");
+static_assert(offsetof(EmlFrame32_s, header) == 0U, "EML32 header offset");
+static_assert(offsetof(EmlFrame32_s, payload) == EML_PAYLOAD_OFFSET, "EML32 payload offset");
+static_assert(offsetof(EmlFrame32_s, crc) == EML_CRC_OFFSET_32, "EML32 CRC offset");
+static_assert(sizeof(EmlFrame64_s) == 64U, "EML64 wire size");
+static_assert(offsetof(EmlFrame64_s, header) == 0U, "EML64 header offset");
+static_assert(offsetof(EmlFrame64_s, payload) == EML_PAYLOAD_OFFSET, "EML64 payload offset");
+static_assert(offsetof(EmlFrame64_s, crc) == EML_CRC_OFFSET_64, "EML64 CRC offset");
 
 enum EmlPktType_e : uint8_t
 {
