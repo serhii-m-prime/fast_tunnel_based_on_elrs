@@ -9,6 +9,8 @@
 #include "FIFO.h"
 #include "eml_frame.h"
 #include "eml_sync.h"
+#include "eml_uart.h"
+#include "eml_mailbox.h"
 
 #define UID_LEN             6
 
@@ -207,8 +209,33 @@ void OtaResetChannelDataComplete();
 bool OtaIsChannelDataComplete(uint32_t const *channelData);
 #endif
 
-void OtaPackAirportData(OTA_Packet_s * const otaPktPtr, FIFO<AP_MAX_BUF_LEN> *inputBuffer);
-void OtaUnpackAirportData(OTA_Packet_s const * const otaPktPtr, FIFO<AP_MAX_BUF_LEN> *outputBuffer);
+// Legacy AirPort stays on its existing OTA envelope until P4.6. Counts are
+// clamped BEFORE narrowing, and malformed/full packets never flush old bytes.
+// Force inline: a section attribute on a weak template does not reliably keep
+// its body in IRAM with these toolchains. Radio callers themselves are IRAM.
+template <uint32_t Size>
+__attribute__((always_inline)) inline void OtaPackAirportData(OTA_Packet_s *otaPktPtr, FIFO<Size> *inputBuffer)
+{
+    otaPktPtr->std.type = PACKET_TYPE_DATA;
+    inputBuffer->lock();
+    const uint16_t maximum = OtaIsFullRes ? ELRS8_DATA_DL_BYTES_PER_CALL : ELRS4_DATA_DL_BYTES_PER_CALL;
+    const uint16_t count = inputBuffer->size() < maximum ? inputBuffer->size() : maximum;
+    uint8_t *payload = OtaIsFullRes ? otaPktPtr->full.airport.payload : otaPktPtr->std.airport.payload;
+    inputBuffer->tryPopBytes(payload, count);
+    if (OtaIsFullRes) otaPktPtr->full.airport.count = (uint8_t)count;
+    else otaPktPtr->std.airport.count = (uint8_t)count;
+    inputBuffer->unlock();
+}
+
+template <uint32_t Size>
+__attribute__((always_inline)) inline bool OtaUnpackAirportData(const OTA_Packet_s *otaPktPtr, FIFO<Size> *outputBuffer)
+{
+    const uint8_t count = OtaIsFullRes ? otaPktPtr->full.airport.count : otaPktPtr->std.airport.count;
+    const uint8_t maximum = OtaIsFullRes ? ELRS8_DATA_DL_BYTES_PER_CALL : ELRS4_DATA_DL_BYTES_PER_CALL;
+    if (count > maximum) return false;
+    const uint8_t *payload = OtaIsFullRes ? otaPktPtr->full.airport.payload : otaPktPtr->std.airport.payload;
+    return outputBuffer->atomicTryPushBytes(payload, count);
+}
 
 #if defined(DEBUG_RCVR_LINKSTATS)
 extern uint32_t debugRcvrLinkstatsPacketId;

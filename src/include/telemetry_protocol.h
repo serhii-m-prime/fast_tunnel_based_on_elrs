@@ -12,4 +12,10 @@
 #define ELRS_DATA_UL_BUFFER 65
 #define ELRS_MSP_MAX_PACKAGES ((ELRS_DATA_UL_BUFFER / ELRS4_DATA_UL_BYTES_PER_CALL)+1)
 
-#define AP_MAX_BUF_LEN  64
+#if defined(USE_AIRPORT_AT_BAUD) && defined(TARGET_TX) && defined(PLATFORM_ESP32)
+#define AP_MAX_BUF_LEN 4096
+#elif defined(USE_AIRPORT_AT_BAUD) && defined(TARGET_RX)
+#define AP_MAX_BUF_LEN 1024
+#else
+#define AP_MAX_BUF_LEN 64
+#endif

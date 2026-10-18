@@ -52,19 +52,57 @@ private:
     uint32_t numElements = 0;
 #if defined(PLATFORM_ESP32)
     portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+#elif defined(PLATFORM_ESP8266)
+    uint32_t savedInterruptState = 0;
 #endif
 
 public:
+    // Non-destructive variants for raw serial streams. No logging/flush and
+    // no partial admission. Caller serializes access or uses atomicTryPushBytes.
+    // GCC/LTO may discard section attributes on template instantiations: force
+    // these short helpers into their caller, whose ISR entry is IRAM_ATTR.
+    __attribute__((always_inline)) inline bool tryPushBytes(const uint8_t *data, const uint16_t len)
+    {
+        if (len > FIFO_SIZE - numElements || (len && data == nullptr)) return false;
+        for (uint16_t i = 0; i < len; ++i)
+        {
+            buffer[tail] = data[i];
+            tail = (tail + 1) % FIFO_SIZE;
+        }
+        numElements += len;
+        return true;
+    }
+    __attribute__((always_inline)) inline bool atomicTryPushBytes(const uint8_t *data, const uint16_t len)
+    {
+        lock();
+        const bool accepted = tryPushBytes(data, len);
+        unlock();
+        return accepted;
+    }
+    __attribute__((always_inline)) inline bool peekBytes(uint8_t *out, const uint16_t len) const
+    {
+        if (len > numElements || (len && out == nullptr)) return false;
+        for (uint16_t i = 0; i < len; ++i) out[i] = buffer[(head + i) % FIFO_SIZE];
+        return true;
+    }
+    __attribute__((always_inline)) inline bool tryPopBytes(uint8_t *out, const uint16_t len)
+    {
+        if (!peekBytes(out, len)) return false;
+        head = (head + len) % FIFO_SIZE;
+        numElements -= len;
+        return true;
+    }
+
     /**
      * @brief lock the FIFO so no other code should interact with the FIFO.
      * Assumes that critical blocks are wrapped in lock/unlock semantics
      */
-    ICACHE_RAM_ATTR void lock()
+    __attribute__((always_inline)) inline void lock()
     {
     #if defined(PLATFORM_ESP32)
         portENTER_CRITICAL(&mux);
     #elif defined(PLATFORM_ESP8266)
-        noInterrupts();
+        savedInterruptState = xt_rsil(15);
     #else
     #endif
     }
@@ -72,12 +110,12 @@ public:
     /**
      * @brief unlock the FIFO
      */
-    ICACHE_RAM_ATTR void unlock()
+    __attribute__((always_inline)) inline void unlock()
     {
     #if defined(PLATFORM_ESP32)
         portEXIT_CRITICAL(&mux);
     #elif defined(PLATFORM_ESP8266)
-        interrupts();
+        xt_wsr_ps(savedInterruptState);
     #else
     #endif
     }
@@ -202,7 +240,7 @@ public:
      *
      * @return number of bytes in the FIFO
      */
-    ICACHE_RAM_ATTR uint16_t size() const
+    __attribute__((always_inline)) inline uint16_t size() const
     {
         return numElements;
     }

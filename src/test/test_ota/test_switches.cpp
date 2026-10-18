@@ -902,6 +902,39 @@ void test_eml_crc16_single_bit_errors()
     }
 }
 
+void test_airport_large_queues_and_malformed_count()
+{
+    FIFO<4096> input;
+    uint8_t source[512];
+    for (size_t i = 0; i < sizeof(source); ++i) source[i] = (uint8_t)i;
+    for (bool full : {false, true})
+    {
+        OtaIsFullRes = full;
+        input.flush();
+        TEST_ASSERT_TRUE(input.tryPushBytes(source, sizeof(source)));
+        OTA_Packet_s packet = {};
+        OtaPackAirportData(&packet, &input);
+        const uint8_t maximum = full ? ELRS8_DATA_DL_BYTES_PER_CALL : ELRS4_DATA_DL_BYTES_PER_CALL;
+        TEST_ASSERT_EQUAL(maximum, full ? packet.full.airport.count : packet.std.airport.count);
+        TEST_ASSERT_EQUAL(512 - maximum, input.size());
+        FIFO<16> output;
+        TEST_ASSERT_TRUE(OtaUnpackAirportData(&packet, &output));
+        uint8_t received[10];
+        TEST_ASSERT_TRUE(output.peekBytes(received, maximum));
+        TEST_ASSERT_EQUAL_HEX8_ARRAY(source, received, maximum);
+        if (full) packet.full.airport.count = 31;
+        else packet.std.airport.count = 63;
+        TEST_ASSERT_FALSE(OtaUnpackAirportData(&packet, &output));
+        TEST_ASSERT_EQUAL(maximum, output.size());
+        if (full) packet.full.airport.count = maximum;
+        else packet.std.airport.count = maximum;
+        // Fill exactly; subsequent valid packets must be refused without flushing.
+        TEST_ASSERT_TRUE(output.tryPushBytes(source, 16 - maximum));
+        TEST_ASSERT_FALSE(OtaUnpackAirportData(&packet, &output));
+        TEST_ASSERT_EQUAL(16, output.size());
+    }
+}
+
 // Unity setup/teardown
 void setUp() {}
 void tearDown() {}
@@ -939,6 +972,7 @@ int main(int argc, char **argv)
     RUN_TEST(test_eml_crc16_reference_vectors);
     RUN_TEST(test_eml_crc16_frame_vectors);
     RUN_TEST(test_eml_crc16_single_bit_errors);
+    RUN_TEST(test_airport_large_queues_and_malformed_count);
 
     UNITY_END();
 

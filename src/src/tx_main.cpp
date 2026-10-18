@@ -55,6 +55,8 @@ Stream *TxUSB = &nullStream;
 // Variables / constants for Airport //
 FIFO<AP_MAX_BUF_LEN> apInputBuffer;
 FIFO<AP_MAX_BUF_LEN> apOutputBuffer;
+static EmlUartStats_s apUartStats;
+static volatile uint32_t apRadioRejectedFrames = 0;
 
 #define UART_INPUT_BUF_LEN 1024
 FIFO<UART_INPUT_BUF_LEN> uartInputBuffer;
@@ -285,7 +287,7 @@ static bool ICACHE_RAM_ATTR ProcessDownlinkPacket(SX12xxDriverCommon::rx_status 
       case PACKET_TYPE_DATA:
         if (firmwareOptions.is_airport)
         {
-          OtaUnpackAirportData(otaPktPtr, &apOutputBuffer);
+          if (!OtaUnpackAirportData(otaPktPtr, &apOutputBuffer)) ++apRadioRejectedFrames;
         }
         else
         {
@@ -320,7 +322,7 @@ static bool ICACHE_RAM_ATTR ProcessDownlinkPacket(SX12xxDriverCommon::rx_status 
       case PACKET_TYPE_DATA:
         if (firmwareOptions.is_airport)
         {
-          OtaUnpackAirportData(otaPktPtr, &apOutputBuffer);
+          if (!OtaUnpackAirportData(otaPktPtr, &apOutputBuffer)) ++apRadioRejectedFrames;
         }
         else
         {
@@ -1099,15 +1101,7 @@ static void HandleUARTout()
 {
   if (firmwareOptions.is_airport)
   {
-    auto size = apOutputBuffer.size();
-    if (size)
-    {
-      uint8_t buf[size];
-      apOutputBuffer.lock();
-      apOutputBuffer.popBytes(buf, size);
-      apOutputBuffer.unlock();
-      TxUSB->write(buf, size);
-    }
+    emlDrainSerial(*TxUSB, apOutputBuffer, apUartStats);
   }
 }
 
@@ -1115,25 +1109,7 @@ static void HandleUARTin()
 {
   if (firmwareOptions.is_airport)
   {
-    if (connectionState != connected)
-    {
-      // Discard any bytes received before the RF link is established
-      uint8_t discardBuf[64];
-      while (TxUSB->available() > 0)
-      {
-        TxUSB->readBytes(discardBuf, std::min((int)sizeof(discardBuf), TxUSB->available()));
-      }
-      return;
-    }
-    auto size = std::min(apInputBuffer.free(), (uint16_t)TxUSB->available());
-    if (size > 0)
-    {
-      uint8_t buf[size];
-      size = TxUSB->readBytes(buf, size);
-      apInputBuffer.lock();
-      apInputBuffer.pushBytes(buf, size);
-      apInputBuffer.unlock();
-    }
+    emlReadSerial(*TxUSB, apInputBuffer, connectionState == connected, apUartStats);
     return;
   }
 

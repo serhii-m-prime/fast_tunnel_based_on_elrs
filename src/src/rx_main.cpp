@@ -947,7 +947,8 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
     {
         if (connectionState == connected)
         {
-            OtaUnpackAirportData(otaPktPtr, &((SerialAirPort *)serialIO)->apOutputBuffer);
+            auto *airport = static_cast<SerialAirPort *>(serialIO);
+            if (!OtaUnpackAirportData(otaPktPtr, &airport->apOutputBuffer)) ++airport->radioRejectedFrames;
         }
         return;
     }

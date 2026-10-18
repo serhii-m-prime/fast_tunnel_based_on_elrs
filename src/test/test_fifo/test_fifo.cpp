@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstring>
 #include <FIFO.h>
 #include <unity.h>
 #include <set>
@@ -159,6 +160,28 @@ void test_fifo_skip_empty()
     TEST_ASSERT_EQUAL(42, f.pop());
 }
 
+void test_fifo_try_operations_preserve_data_on_failure()
+{
+    FIFO<8> queue;
+    const uint8_t bytes[] = {0, 1, 2, 3, 4, 5, 6, 7};
+    TEST_ASSERT_TRUE(queue.atomicTryPushBytes(bytes, 8));
+    TEST_ASSERT_FALSE(queue.tryPushBytes(bytes, 1));
+    TEST_ASSERT_FALSE(queue.atomicTryPushBytes(bytes, 1));
+    TEST_ASSERT_EQUAL(8, queue.size());
+    uint8_t out[9]; memset(out, 0xA5, sizeof(out));
+    TEST_ASSERT_FALSE(queue.tryPopBytes(out, 9));
+    TEST_ASSERT_EQUAL_HEX8(0xA5, out[0]); TEST_ASSERT_EQUAL(8, queue.size());
+    TEST_ASSERT_TRUE(queue.peekBytes(out, 8));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(bytes, out, 8); TEST_ASSERT_EQUAL(8, queue.size());
+    TEST_ASSERT_TRUE(queue.tryPopBytes(out, 3));
+    TEST_ASSERT_TRUE(queue.tryPushBytes(bytes, 3));
+    const uint8_t wrapped[] = {3, 4, 5, 6, 7, 0, 1, 2};
+    TEST_ASSERT_TRUE(queue.tryPopBytes(out, 8));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(wrapped, out, 8); TEST_ASSERT_EQUAL(0, queue.size());
+    TEST_ASSERT_FALSE(queue.tryPushBytes(nullptr, 1));
+    TEST_ASSERT_TRUE(queue.tryPushBytes(nullptr, 0));
+}
+
 // Unity setup/teardown
 void setUp() {}
 void tearDown() {}
@@ -174,6 +197,7 @@ int main(int argc, char **argv)
     RUN_TEST(test_fifo_skip_wraparound);
     RUN_TEST(test_fifo_skip_zero);
     RUN_TEST(test_fifo_skip_empty);
+    RUN_TEST(test_fifo_try_operations_preserve_data_on_failure);
     UNITY_END();
 
     return 0;
