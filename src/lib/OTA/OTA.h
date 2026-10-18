@@ -8,6 +8,7 @@
 #include "telemetry_protocol.h"
 #include "FIFO.h"
 #include "eml_frame.h"
+#include "eml_sync.h"
 
 #define UID_LEN             6
 

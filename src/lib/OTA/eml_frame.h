@@ -3,9 +3,10 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /**
- * EML (ExpressLRS Modified Link) header, fixed frame layout and CRC (P2.1-P2.3)
+ * EML (ExpressLRS Modified Link) header, fixed frame layout, CRC and codec.
  *
  * Explicit byte-level encoding independent of C/C++ compiler bitfield layout
  * and target endianness.
@@ -70,7 +71,7 @@
  * be EML_PADDING_VALUE. CRC always occupies the final two bytes, independently
  * of payload_len. All fields are byte arrays, so no packed attribute or native
  * integer endianness is involved. CRC is CCITT-FALSE, high byte then low byte.
- * This defines storage only; frame encoding/validation belongs to P2.6.
+ * These types define storage; use emlFrameEncode/emlFrameDecode for the codec.
  */
 template <size_t FrameSize>
 struct EmlFrame_s
@@ -157,8 +158,8 @@ static inline constexpr uint8_t emlMaxPayloadForFrameSize(uint8_t frameSize)
  * Start each frame with EML_CRC16_INIT. Since xorout=0 and there is no reflection,
  * a previous result can seed the next chunk of the SAME frame (header then payload).
  * No padding, stored CRC, implicit zero bytes, UID or FHSS nonce enter this CRC.
- * This primitive does not encode/validate a frame or establish ISR timing/placement;
- * full codec and RF integration are separate tasks (P2.6 and P4).
+ * This primitive does not validate a frame or establish ISR timing/placement.
+ * RF integration and ISR placement remain separate tasks (P3.8 and P4).
  */
 static inline uint16_t emlCrc16(const uint8_t *data, size_t length, uint16_t crc = EML_CRC16_INIT)
 {
@@ -267,6 +268,100 @@ static inline EmlHdrStatus_e emlHeaderDecode(const uint8_t in[EML_HEADER_SIZE], 
     hdr->flow_ctrl   = (uint8_t)((in[1] >> EML_HDR_B1_FLOW_CTRL_SHIFT) & EML_HDR_B1_FLOW_CTRL_MASK);
 
     return emlHeaderValidate(hdr, maxPayloadLen);
+}
+
+enum EmlFrameStatus_e : uint8_t
+{
+    EML_FRAME_OK = 0U,
+    EML_FRAME_ERR_NULL_PTR,
+    EML_FRAME_ERR_FRAME_SIZE,
+    EML_FRAME_ERR_LENGTH,
+    EML_FRAME_ERR_HEADER,
+    EML_FRAME_ERR_PAYLOAD_LENGTH,
+    EML_FRAME_ERR_CRC,
+    EML_FRAME_ERR_PADDING
+};
+
+// A borrowed, read-only payload view. It remains valid only while the input
+// buffer is alive and unchanged. This view must not overlap the input buffer.
+struct EmlFrameView_s
+{
+    EmlHeader_s header;
+    const uint8_t *payload;
+};
+
+/**
+ * Encode exactly frameSize (32 or 64) bytes after validating all inputs.
+ * payloadLength must equal header->payload_len, and payload may be null only
+ * for length zero. outCapacity may be larger than frameSize; its tail is untouched.
+ * Payload/output overlap is supported, including encoding in place. All errors
+ * leave output untouched. No heap, global state, ARQ or UART side effects.
+ */
+static inline EmlFrameStatus_e emlFrameEncode(const EmlHeader_s *header,
+                                             const uint8_t *payload, size_t payloadLength,
+                                             uint8_t *out, size_t outCapacity, size_t frameSize)
+{
+    if (header == nullptr || out == nullptr)
+        return EML_FRAME_ERR_NULL_PTR;
+    if (frameSize != EML_FRAME_SIZE_32 && frameSize != EML_FRAME_SIZE_64)
+        return EML_FRAME_ERR_FRAME_SIZE;
+    if (outCapacity < frameSize)
+        return EML_FRAME_ERR_LENGTH;
+
+    const EmlHeader_s value = *header;
+    const uint8_t maximum = emlMaxPayloadForFrameSize((uint8_t)frameSize);
+    if (emlHeaderValidate(&value, maximum) != EML_HDR_OK)
+        return EML_FRAME_ERR_HEADER;
+    if (payloadLength != value.payload_len)
+        return EML_FRAME_ERR_PAYLOAD_LENGTH;
+    if (payloadLength != 0U && payload == nullptr)
+        return EML_FRAME_ERR_NULL_PTR;
+
+    // Copy before touching header/padding, so payload may point anywhere in out.
+    if (payloadLength != 0U)
+        memmove(out + EML_PAYLOAD_OFFSET, payload, payloadLength);
+    emlHeaderEncode(&value, out, maximum);
+    const size_t protectedLength = EML_HEADER_SIZE + payloadLength;
+    const size_t crcOffset = frameSize - EML_CRC_SIZE;
+    memset(out + protectedLength, EML_PADDING_VALUE, crcOffset - protectedLength);
+    const uint16_t crc = emlCrc16(out, protectedLength);
+    out[crcOffset] = (uint8_t)(crc >> 8U);
+    out[crcOffset + 1U] = (uint8_t)(crc & 0xFFU);
+    return EML_FRAME_OK;
+}
+
+/**
+ * Decode an exact physical frame. Reject length/header errors before selecting
+ * the CRC span, then verify CRC and every padding byte. Publish the output only
+ * on success; errors leave the previous view untouched. Success proves envelope
+ * integrity, not peer/session acceptance or Sync payload semantics (eml_sync.h).
+ */
+static inline EmlFrameStatus_e emlFrameDecode(const uint8_t *in, size_t inLength,
+                                             size_t frameSize, EmlFrameView_s *out)
+{
+    if (in == nullptr || out == nullptr)
+        return EML_FRAME_ERR_NULL_PTR;
+    if (frameSize != EML_FRAME_SIZE_32 && frameSize != EML_FRAME_SIZE_64)
+        return EML_FRAME_ERR_FRAME_SIZE;
+    if (inLength != frameSize)
+        return EML_FRAME_ERR_LENGTH;
+
+    EmlFrameView_s value = {};
+    if (emlHeaderDecode(in, &value.header, emlMaxPayloadForFrameSize((uint8_t)frameSize)) != EML_HDR_OK)
+        return EML_FRAME_ERR_HEADER;
+    const size_t protectedLength = EML_HEADER_SIZE + value.header.payload_len;
+    const size_t crcOffset = frameSize - EML_CRC_SIZE;
+    const uint16_t received = (uint16_t)((uint16_t)in[crcOffset] << 8U) | in[crcOffset + 1U];
+    if (emlCrc16(in, protectedLength) != received)
+        return EML_FRAME_ERR_CRC;
+    for (size_t i = protectedLength; i < crcOffset; ++i)
+    {
+        if (in[i] != EML_PADDING_VALUE)
+            return EML_FRAME_ERR_PADDING;
+    }
+    value.payload = in + EML_PAYLOAD_OFFSET;
+    *out = value;
+    return EML_FRAME_OK;
 }
 
 #endif // H_EML_FRAME
