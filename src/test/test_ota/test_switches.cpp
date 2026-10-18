@@ -806,6 +806,102 @@ void test_eml_header_validation_errors()
     TEST_ASSERT_EQUAL(EML_HDR_ERR_EMPTY_SYNC, emlHeaderValidate(&h));
 }
 
+void test_eml_crc16_reference_vectors()
+{
+    const uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    const uint8_t zeros[] = {0x00, 0x00, 0x00, 0x00};
+    const uint8_t binary[] = {0x0F, 0xAA, 0x00, 0x55};
+    // Published CRC-16/CCITT-FALSE vectors, AUTOSAR CRC Routines section 7.2.2.1.
+    TEST_ASSERT_EQUAL_HEX16(0xFFFF, emlCrc16(nullptr, 0));
+    TEST_ASSERT_EQUAL_HEX16(0x29B1, emlCrc16(check, sizeof(check)));
+    TEST_ASSERT_EQUAL_HEX16(0x84C0, emlCrc16(zeros, sizeof(zeros)));
+    TEST_ASSERT_EQUAL_HEX16(0x2023, emlCrc16(binary, sizeof(binary)));
+
+    // Streaming must be independent of chunk boundaries, including empty chunks.
+    for (size_t split = 0; split <= sizeof(check); ++split)
+    {
+        const uint16_t partial = emlCrc16(check, split);
+        TEST_ASSERT_EQUAL_HEX16(partial, emlCrc16(nullptr, 0, partial));
+        TEST_ASSERT_EQUAL_HEX16(0x29B1, emlCrc16(check + split, sizeof(check) - split, partial));
+    }
+}
+
+void test_eml_crc16_frame_vectors()
+{
+    // Golden inputs and wire CRC bytes independently checked with Python crc_hqx.
+    // SYNC payload here is synthetic CRC test data, not the P2.4 handshake format.
+    const struct
+    {
+        uint8_t length;
+        uint8_t protectedBytes[EML_HEADER_SIZE + EML_MAX_PAYLOAD_LEN];
+        uint8_t wireCrc[EML_CRC_SIZE];
+    } vectors[] = {
+        {2, {0xB6, 0xC0}, {0x70, 0xE8}},
+        {3, {0x01, 0x01, 0x00}, {0xC8, 0x9D}},
+        {5, {0xE1, 0x03, 0x00, 0xFF, 0x7E}, {0x87, 0x2B}},
+        {14, {0xFC, 0x0C, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+              0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B}, {0x64, 0x20}},
+        {30, {0x4D, 0x5C, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+              0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+              0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+              0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B}, {0x2A, 0x1A}},
+        {62, {0xE1, 0x3C, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+              0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+              0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+              0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D,
+              0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
+              0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
+              0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+              0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B}, {0xFC, 0x65}}
+    };
+    const uint8_t frameSizes[] = {EML_FRAME_SIZE_32, EML_FRAME_SIZE_64};
+    for (const auto &v : vectors)
+    {
+        const uint16_t expected = (uint16_t)((uint16_t)v.wireCrc[0] << 8U) | v.wireCrc[1];
+        for (const uint8_t frameSize : frameSizes)
+        {
+            if (v.length > frameSize - EML_CRC_SIZE)
+                continue;
+            uint8_t frame[EML_FRAME_SIZE_64] = {};
+            memcpy(frame, v.protectedBytes, v.length);
+            memcpy(frame + frameSize - EML_CRC_SIZE, v.wireCrc, EML_CRC_SIZE);
+            EmlHeader_s header = {};
+            TEST_ASSERT_EQUAL(EML_HDR_OK, emlHeaderDecode(frame, &header, emlMaxPayloadForFrameSize(frameSize)));
+            TEST_ASSERT_EQUAL_UINT8(v.length, EML_HEADER_SIZE + header.payload_len);
+            const uint16_t crc = emlCrc16(frame, v.length);
+            TEST_ASSERT_EQUAL_HEX16(expected, crc);
+            TEST_ASSERT_EQUAL_HEX16(expected, emlCrc16(frame + EML_HEADER_SIZE, header.payload_len,
+                                                     emlCrc16(frame, EML_HEADER_SIZE)));
+            // Residue checks the exact MSB-first wire bytes without including padding.
+            TEST_ASSERT_EQUAL_HEX16(0, emlCrc16(frame + frameSize - EML_CRC_SIZE, EML_CRC_SIZE, crc));
+            if (v.length < frameSize - EML_CRC_SIZE)
+            {
+                TEST_ASSERT_NOT_EQUAL(expected, emlCrc16(frame, frameSize - EML_CRC_SIZE));
+                frame[v.length] = 0xA5;
+                TEST_ASSERT_EQUAL_HEX16(expected, emlCrc16(frame, v.length));
+                // A full decoder must independently reject this nonzero padding (P2.6).
+            }
+        }
+    }
+}
+
+void test_eml_crc16_single_bit_errors()
+{
+    uint8_t data[EML_HEADER_SIZE + EML_MAX_PAYLOAD_LEN_64] = {0xE1, 0x3C};
+    for (size_t i = EML_HEADER_SIZE; i < sizeof(data); ++i)
+        data[i] = (uint8_t)(i - EML_HEADER_SIZE);
+    // Exercise every protected header and payload bit of the 64-byte golden frame.
+    for (size_t i = 0; i < sizeof(data); ++i)
+    {
+        for (uint8_t bit = 0; bit < 8U; ++bit)
+        {
+            data[i] ^= (uint8_t)(1U << bit);
+            TEST_ASSERT_NOT_EQUAL(0xFC65, emlCrc16(data, sizeof(data)));
+            data[i] ^= (uint8_t)(1U << bit);
+        }
+    }
+}
+
 // Unity setup/teardown
 void setUp() {}
 void tearDown() {}
@@ -840,6 +936,9 @@ int main(int argc, char **argv)
     RUN_TEST(test_eml_header_vectors);
     RUN_TEST(test_eml_header_exhaustive_roundtrip);
     RUN_TEST(test_eml_header_validation_errors);
+    RUN_TEST(test_eml_crc16_reference_vectors);
+    RUN_TEST(test_eml_crc16_frame_vectors);
+    RUN_TEST(test_eml_crc16_single_bit_errors);
 
     UNITY_END();
 

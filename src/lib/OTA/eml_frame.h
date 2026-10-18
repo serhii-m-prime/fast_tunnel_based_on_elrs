@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /**
- * EML (ExpressLRS Modified Link) header and fixed frame layout (P2.1-P2.2)
+ * EML (ExpressLRS Modified Link) header, fixed frame layout and CRC (P2.1-P2.3)
  *
  * Explicit byte-level encoding independent of C/C++ compiler bitfield layout
  * and target endianness.
@@ -33,6 +33,13 @@
 #define EML_CRC_OFFSET_32           (EML_FRAME_SIZE_32 - EML_CRC_SIZE)
 #define EML_CRC_OFFSET_64           (EML_FRAME_SIZE_64 - EML_CRC_SIZE)
 #define EML_PADDING_VALUE           0x00U
+
+// CRC-16/CCITT-FALSE: width=16, refin=false, refout=false, no augmentation.
+// Covers the two header bytes followed by exactly payload_len payload bytes.
+// Padding is excluded. Store the result MSB first in the final two frame bytes.
+#define EML_CRC16_POLY              0x1021U
+#define EML_CRC16_INIT              0xFFFFU
+#define EML_CRC16_XOROUT            0x0000U
 
 #define EML_MAX_PAYLOAD_LEN_32      (EML_FRAME_SIZE_32 - EML_OVERHEAD_SIZE) // 28 bytes
 #define EML_MAX_PAYLOAD_LEN_64      (EML_FRAME_SIZE_64 - EML_OVERHEAD_SIZE) // 60 bytes
@@ -62,7 +69,7 @@
  * Only the first payload_len bytes of payload are meaningful; the rest must
  * be EML_PADDING_VALUE. CRC always occupies the final two bytes, independently
  * of payload_len. All fields are byte arrays, so no packed attribute or native
- * integer endianness is involved. CRC parameters/byte order belong to P2.3.
+ * integer endianness is involved. CRC is CCITT-FALSE, high byte then low byte.
  * This defines storage only; frame encoding/validation belongs to P2.6.
  */
 template <size_t FrameSize>
@@ -141,6 +148,29 @@ static inline constexpr uint8_t emlMaxPayloadForFrameSize(uint8_t frameSize)
 {
     return (frameSize == EML_FRAME_SIZE_32) ? EML_MAX_PAYLOAD_LEN_32 :
            (frameSize == EML_FRAME_SIZE_64) ? EML_MAX_PAYLOAD_LEN_64 : 0U;
+}
+
+/**
+ * Table-free CRC-16/CCITT-FALSE reference calculation (P2.3).
+ * data must point to length readable bytes; nullptr is permitted only for length=0.
+ * The caller validates the frame and payload length before selecting this span.
+ * Start each frame with EML_CRC16_INIT. Since xorout=0 and there is no reflection,
+ * a previous result can seed the next chunk of the SAME frame (header then payload).
+ * No padding, stored CRC, implicit zero bytes, UID or FHSS nonce enter this CRC.
+ * This primitive does not encode/validate a frame or establish ISR timing/placement;
+ * full codec and RF integration are separate tasks (P2.6 and P4).
+ */
+static inline uint16_t emlCrc16(const uint8_t *data, size_t length, uint16_t crc = EML_CRC16_INIT)
+{
+    for (size_t i = 0; i < length; ++i)
+    {
+        crc ^= (uint16_t)((uint16_t)data[i] << 8U);
+        for (uint8_t bit = 0; bit < 8U; ++bit)
+        {
+            crc = (uint16_t)((crc << 1U) ^ ((crc & 0x8000U) ? EML_CRC16_POLY : 0U));
+        }
+    }
+    return (uint16_t)(crc ^ EML_CRC16_XOROUT);
 }
 
 /**
