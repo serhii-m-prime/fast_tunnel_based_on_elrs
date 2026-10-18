@@ -13,9 +13,11 @@ struct EmlRadioDescriptor_s
     uint32_t slot_start_us; // RX: local boundary of context.slot (MAC phase tracking)
     uint8_t flags;          // RX: EML_DESC_* MAC flags
     int8_t rssi;            // RX: packet RSSI in dBm (LoRa packet RSSI, FSK RSSI at PayloadReady)
+    int8_t snr;             // RX: whole dB; meaningful only with EML_DESC_HAS_SNR
 };
 
 #define EML_DESC_SEARCH 0x01U // received while the responder was unlocked; context.slot/hop unknown
+#define EML_DESC_HAS_SNR 0x02U
 
 /**
  * Two-entry SPSC handoff for ISR <-> foreground (one mailbox per direction).
@@ -34,7 +36,7 @@ public:
     __attribute__((always_inline)) inline bool push(const uint8_t *bytes, size_t length, const EmlRxContext_s &context,
                                                    const EmlTxTicket_s *ticket = nullptr,
                                                    uint32_t rxUs = 0, uint32_t slotStartUs = 0, uint8_t flags = 0,
-                                                   int8_t rssi = 0)
+                                                   int8_t rssi = 0, int8_t snr = 0)
     {
         if (!bytes || (length != EML_ACK_FRAME_SIZE && length != 32 && length != 64)) return false;
         if (ticket && (!ticket->serial || ticket->generation != context.generation || ticket->slot != context.slot)) return false;
@@ -57,6 +59,7 @@ public:
         entry.slot_start_us = slotStartUs;
         entry.flags = flags;
         entry.rssi = rssi;
+        entry.snr = snr;
         __atomic_store_n(&head_, head + 1U, __ATOMIC_RELEASE);
         return true;
     }
@@ -83,6 +86,7 @@ public:
         out->slot_start_us = entry.slot_start_us;
         out->flags = entry.flags;
         out->rssi = entry.rssi;
+        out->snr = entry.snr;
         __atomic_store_n(&tail_, tail + 1U, __ATOMIC_RELEASE);
         return true;
     }

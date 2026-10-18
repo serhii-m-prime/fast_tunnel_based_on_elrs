@@ -12,7 +12,13 @@
 #define ELRS_DATA_UL_BUFFER 65
 #define ELRS_MSP_MAX_PACKAGES ((ELRS_DATA_UL_BUFFER / ELRS4_DATA_UL_BYTES_PER_CALL)+1)
 
-#if defined(USE_AIRPORT_AT_BAUD) && defined(TARGET_TX) && defined(PLATFORM_ESP32)
+// EML bridge: transport rings per direction depend on the MCU, not on the role
+// (an ES900RX running as Master is a TARGET_TX ESP8285 build)
+#if defined(EML_BRIDGE) && defined(PLATFORM_ESP32)
+#define AP_MAX_BUF_LEN 4096
+#elif defined(EML_BRIDGE)
+#define AP_MAX_BUF_LEN 2048
+#elif defined(USE_AIRPORT_AT_BAUD) && defined(TARGET_TX) && defined(PLATFORM_ESP32)
 #define AP_MAX_BUF_LEN 4096
 #elif defined(USE_AIRPORT_AT_BAUD) && defined(TARGET_RX)
 #define AP_MAX_BUF_LEN 1024

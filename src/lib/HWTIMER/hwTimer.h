@@ -3,6 +3,17 @@
 #include "targets.h"
 #include <stdio.h>
 
+// EML selects the protocol role at runtime: a timer without a tick callback is a
+// tock-only slot master (stock TX behaviour), one with a tick callback follows a
+// remote clock with phase shifts (stock RX behaviour), on either target.
+#if defined(EML_BRIDGE)
+#define HWTIMER_TOCK_ONLY() (hwTimer::tockOnly())
+#elif defined(TARGET_TX)
+#define HWTIMER_TOCK_ONLY() (true)
+#else
+#define HWTIMER_TOCK_ONLY() (false)
+#endif
+
 #if defined(TARGET_TX)
 #define TimerIntervalUSDefault 4000
 #else
@@ -28,7 +39,9 @@ public:
     /**
      * @brief Initialise the timer with the specified tick/tock callback functions.
      *
-     * Only the tock callback is used for transmitter targets.
+     * Only the tock callback is used for transmitter targets. EML_BRIDGE builds use
+     * the tock-only mode when callbackTick is nullptr, and may call init() again
+     * while the timer is stopped to change the role.
      *
      * The timer initialised in the stopped state and must be started with resume().
      */
@@ -93,6 +106,8 @@ public:
 
     static volatile bool running;
     static volatile bool isTick;
+
+    static ICACHE_RAM_ATTR bool inline tockOnly() { return callbackTick == nullptr; }
 
 private:
     static void callback();

@@ -172,6 +172,8 @@ typedef enum
 // SX127X_REG_PA_DAC
 #define SX127X_PA_BOOST_OFF 0b00000100 //  2     0     PA_BOOST disabled
 #define SX127X_PA_BOOST_ON 0b00000111  //  2     0     +20 dBm on PA_BOOST when OUTPUT_POWER = 0b1111
+#define SX127X_PA_DAC_DEFAULT 0x84      // full RegPaDac value, reserved high bit retained
+#define SX127X_PA_DAC_20DBM 0x87       // full RegPaDac value for +20 dBm mode
 
 // SX127X_REG_HOP_PERIOD
 #define SX127X_HOP_PERIOD_OFF 0b00000000 //  7     0     number of periods between frequency hops; 0 = disabled

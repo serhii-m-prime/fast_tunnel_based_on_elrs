@@ -44,6 +44,9 @@ public:
     bool SetPacketLength(uint8_t length); // IRAM, FSK control anchors; no modem reconfiguration
 #endif
     volatile uint32_t FskFifoOverruns = 0;
+    // TX/RX entered from FSTX/FSRX before PllLock (waited), or no lock within the bound
+    volatile uint32_t FskPllWaits = 0, FskPllTimeouts = 0;
+    void FskWaitPllLock(SX12XX_Radio_Number_t radioNumber);
 #endif
     void SetMode(SX127x_RadioOPmodes mode, SX12XX_Radio_Number_t radioNumber);
     void SetTxIdleMode() { SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All); } // set Idle mode used when switching from RX to TX
@@ -56,6 +59,12 @@ public:
     void SetCRCMode(bool on); //false for off
     void SetSyncWord(uint8_t syncWord);
     void SetOutputPower(uint8_t Power);
+    // SX1276 PA_BOOST +20 dBm mode. Applied with PA_CONFIG while the radio is
+    // safely in Standby; OCP stays enabled at 150 mA as required by the datasheet.
+    void Set20dBmMode(bool enabled);
+    // Startup-only helper: commit a scheduled PA change without transmitting.
+    // Returns false rather than disturbing RX/TX when the modem is not idle.
+    bool ApplyOutputPowerAtIdle();
     void SetPreambleLength(uint8_t PreambleLen);
     void SetSpreadingFactor(SX127x_SpreadingFactor sf);
 
@@ -64,6 +73,12 @@ public:
 
     #define FREQ_STEP 61.03515625
     void SetFrequencyReg(uint32_t freq, SX12XX_Radio_Number_t radioNumber, bool doRx = false);
+#if defined(EML_BRIDGE)
+    // Fast TDD path: program FRF from Standby, then start the appropriate
+    // synthesizer while FIFO/RF-switch work is performed. TXnb/RXnb complete
+    // the transition without returning to Standby.
+    void PrepareFrequencyFast(uint32_t freq, bool tx, SX12XX_Radio_Number_t radioNumber = SX12XX_Radio_All);
+#endif
     bool FrequencyErrorAvailable() const { return true; }
     int32_t GetFrequencyError();
     bool GetFrequencyErrorbool(SX12XX_Radio_Number_t radioNumber);
@@ -105,6 +120,8 @@ private:
     uint8_t currPreambleLen;
     uint8_t pwrCurrent;
     int16_t pwrPending;
+    bool pwr20Current;
+    int8_t pwr20Pending;
     uint8_t lowFrequencyMode;
 #if defined(SX127X_FSK_SUPPORT)
     uint8_t fskRxConfig;

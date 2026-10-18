@@ -109,7 +109,9 @@ static void timeoutFan()
 {
     static uint8_t fanStateDuration;
     static bool fanIsOn;
-#if defined(TARGET_RX)
+#if defined(EML_BRIDGE)
+    bool fanShouldBeOn = POWERMGNT::currPower() >= (PowerLevels_e)firmwareOptions.bridge_fan_threshold;
+#elif defined(TARGET_RX)
     bool fanShouldBeOn = true;
 #else
     bool fanShouldBeOn = POWERMGNT::currPower() >= (PowerLevels_e)config.GetPowerFanThreshold();

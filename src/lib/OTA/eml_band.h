@@ -15,6 +15,7 @@ class EmlBandController
 {
     EmlRole_e role_ = EML_COORDINATOR;
     uint8_t band_ = 0, mask_ = 15, peerMask_ = 15, phase_ = 0;
+    uint8_t degradeLq_ = 60;
     uint8_t peerLq_ = 100, peerMissed_ = 0;
     uint16_t token_ = 0;
     EmlBandMessage_s pending_ = {};
@@ -22,9 +23,10 @@ class EmlBandController
     bool armed_ = false, healthyValid_ = false;
 
 public:
-    void begin(EmlRole_e role, uint8_t band, uint8_t mask, uint32_t nowMs)
+    void begin(EmlRole_e role, uint8_t band, uint8_t mask, uint32_t nowMs, uint8_t degradeLq = 60)
     {
         role_ = role; band_ = band; mask_ = mask; peerMask_ = 15;
+        degradeLq_ = degradeLq;
         phase_ = 0; armed_ = healthyValid_ = false; since_ = nowMs;
         peerLq_ = 100; peerMissed_ = 0; peerStatusMs_ = nowMs;
     }
@@ -47,8 +49,8 @@ public:
         if (!good) healthyValid_ = false;
         else if (!healthyValid_) { healthy_ = nowMs; healthyValid_ = true; }
         if (role_ != EML_COORDINATOR || busy() || nowMs - since_ < EML_BAND_HOLD_MS) return;
-        const bool bad = (samples >= 10 && lq < 60) || missedAck >= 4 ||
-            (nowMs - peerStatusMs_ <= 2000 && (peerLq_ < 60 || peerMissed_ >= 4));
+        const bool bad = (samples >= 10 && lq < degradeLq_) || missedAck >= 4 ||
+            (nowMs - peerStatusMs_ <= 2000 && (peerLq_ < degradeLq_ || peerMissed_ >= 4));
         const uint8_t common = (uint8_t)(mask_ & peerMask_);
         uint8_t target = band_;
         if (bad)
@@ -76,7 +78,7 @@ public:
         }
         // Regular status provides the peer mask and reports reverse-link degradation.
         // It is separate from raw UART bytes and consumes one normal TDD slot.
-        if (role_ == EML_RESPONDER && ((slot & 63U) == 35U || (samples >= 10 && lq < 60) || missedAck >= 4))
+        if (role_ == EML_RESPONDER && ((slot & 63U) == 35U || (samples >= 10 && lq < degradeLq_) || missedAck >= 4))
         {
             *out = {EML_BAND_STATUS, band_, mask_, (uint16_t)slot,
                     (uint16_t)((uint16_t)(samples >= 10 ? lq : 100) << 8 | missedAck)};
@@ -130,15 +132,20 @@ class EmlBandSearch
     uint32_t since_ = 0, cycleMs_ = 0;
     bool valid_ = false;
 public:
-    bool begin(const EmlPhyPlan_s &plan, EmlRole_e role, const uint8_t *masks, uint32_t nowMs)
+    bool begin(const EmlPhyPlan_s &plan, EmlRole_e role, const uint8_t *masks, uint32_t nowMs,
+               uint8_t preferredBand = 0)
     {
-        plan_ = &plan; role_ = role; since_ = nowMs; cycleMs_ = 0; index_ = 0;
+        plan_ = &plan; role_ = role; since_ = nowMs; cycleMs_ = 0;
+        index_ = preferredBand < EML_BAND_COUNT ? preferredBand : 0;
         valid_ = false;
         if (!masks || !plan.count || plan.count > EML_PHY_MAX) return false;
         for (uint8_t p = 0; p < plan.count; ++p)
         { masks_[p] = masks[p] & 15U; cycleMs_ += EML_BAND_COUNT * plan.coordinator_dwell_ms[p]; }
-        for (; index_ < plan.count * EML_BAND_COUNT; ++index_)
+        for (uint8_t checked = 0; checked < plan.count * EML_BAND_COUNT; ++checked)
+        {
             if (masks_[phy()] & (1U << band())) { valid_ = true; return true; }
+            index_ = (uint8_t)((index_ + 1U) % (plan.count * EML_BAND_COUNT));
+        }
         index_ = 0;
         return false;
     }

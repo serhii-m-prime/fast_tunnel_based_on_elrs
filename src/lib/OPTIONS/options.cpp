@@ -76,7 +76,6 @@ void saveOptions(Stream &stream, bool customised)
     }
     #if defined(TARGET_TX)
     doc["tlm-interval"] = firmwareOptions.tlm_report_interval;
-    doc["fan-runtime"] = firmwareOptions.fan_min_runtime;
     doc["unlock-higher-power"] = firmwareOptions.unlock_higher_power;
     doc["airport-uart-baud"] = firmwareOptions.uart_baud;
     #else
@@ -84,6 +83,20 @@ void saveOptions(Stream &stream, bool customised)
     doc["lock-on-first-connection"] = firmwareOptions.lock_on_first_connection;
     doc["dji-permanently-armed"] = firmwareOptions.dji_permanently_armed;
     #endif
+    doc["fan-runtime"] = firmwareOptions.fan_min_runtime;
+#if defined(EML_BRIDGE)
+    doc["bridge-default-band"] = firmwareOptions.bridge_default_band;
+    doc["bridge-adaptive-fallback"] = firmwareOptions.bridge_adaptive_fallback;
+    doc["bridge-lq-threshold"] = firmwareOptions.bridge_lq_threshold;
+    doc["bridge-phy"] = firmwareOptions.bridge_phy;
+    doc["bridge-uart-inverted"] = firmwareOptions.bridge_uart_inverted;
+    doc["bridge-tdd-mode"] = firmwareOptions.bridge_tdd_mode;
+    doc["bridge-role"] = firmwareOptions.bridge_role;
+    doc["bridge-traffic-mode"] = firmwareOptions.bridge_traffic_mode;
+    doc["bridge-power"] = firmwareOptions.bridge_power;
+    doc["bridge-dynamic-power"] = firmwareOptions.bridge_dynamic_power;
+    doc["bridge-fan-threshold"] = firmwareOptions.bridge_fan_threshold;
+#endif
     doc["is-airport"] = firmwareOptions.is_airport;
     doc["domain"] = firmwareOptions.domain;
     doc["customised"] = customised;
@@ -178,9 +191,9 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
     firmwareOptions.wifi_auto_on_interval = wifiInterval == -1 ? -1 : wifiInterval * 1000;
     strlcpy(firmwareOptions.home_wifi_ssid, doc["wifi-ssid"] | "", sizeof(firmwareOptions.home_wifi_ssid));
     strlcpy(firmwareOptions.home_wifi_password, doc["wifi-password"] | "", sizeof(firmwareOptions.home_wifi_password));
+    firmwareOptions.fan_min_runtime = doc["fan-runtime"] | 30U;
     #if defined(TARGET_TX)
     firmwareOptions.tlm_report_interval = doc["tlm-interval"] | 240U;
-    firmwareOptions.fan_min_runtime = doc["fan-runtime"] | 30U;
     firmwareOptions.unlock_higher_power = doc["unlock-higher-power"] | false;
     #if defined(USE_AIRPORT_AT_BAUD)
     firmwareOptions.uart_baud = doc["airport-uart-baud"] | doc["rcvr-uart-baud"] | USE_AIRPORT_AT_BAUD;
@@ -216,6 +229,49 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
     // firmware whose RC stack has been excluded at build time.
     firmwareOptions.is_airport = true;
     firmwareOptions.uart_baud = normalizeBridgeBaud(firmwareOptions.uart_baud);
+    // Build-time defaults (e.g. bench super_defines.txt); saved WebUI options override them
+#if !defined(EML_DEFAULT_BAND)
+#define EML_DEFAULT_BAND 0U
+#endif
+#if !defined(EML_DEFAULT_PHY)
+#define EML_DEFAULT_PHY EML_OPTION_PHY_GFSK_250
+#endif
+#if !defined(EML_DEFAULT_POWER)
+#define EML_DEFAULT_POWER 2U
+#endif
+    firmwareOptions.bridge_default_band = doc["bridge-default-band"] | (uint8_t)EML_DEFAULT_BAND;
+    if (firmwareOptions.bridge_default_band >= 4) firmwareOptions.bridge_default_band = 0;
+#if !defined(EML_DEFAULT_FALLBACK)
+#define EML_DEFAULT_FALLBACK true
+#endif
+    firmwareOptions.bridge_adaptive_fallback = doc["bridge-adaptive-fallback"] | (bool)EML_DEFAULT_FALLBACK;
+    firmwareOptions.bridge_lq_threshold = doc["bridge-lq-threshold"] | 60U;
+    if (firmwareOptions.bridge_lq_threshold < 10 || firmwareOptions.bridge_lq_threshold > 95)
+        firmwareOptions.bridge_lq_threshold = 60;
+    firmwareOptions.bridge_phy = doc["bridge-phy"] | (uint8_t)EML_DEFAULT_PHY;
+    // 500 kbit/s remains deliberately unavailable: SX1276 specifies 300 kbit/s maximum.
+    if (firmwareOptions.bridge_phy != EML_OPTION_PHY_GFSK_250 &&
+        firmwareOptions.bridge_phy != EML_OPTION_PHY_LORA_SF6)
+        firmwareOptions.bridge_phy = EML_OPTION_PHY_GFSK_250;
+    firmwareOptions.bridge_uart_inverted = doc["bridge-uart-inverted"] | false;
+    firmwareOptions.bridge_tdd_mode = doc["bridge-tdd-mode"] | EML_OPTION_TDD_ADAPTIVE;
+    if (firmwareOptions.bridge_tdd_mode > EML_OPTION_TDD_ADAPTIVE)
+        firmwareOptions.bridge_tdd_mode = EML_OPTION_TDD_ADAPTIVE;
+#if defined(TARGET_TX)
+    firmwareOptions.bridge_role = doc["bridge-role"] | EML_OPTION_ROLE_MASTER;
+#else
+    firmwareOptions.bridge_role = doc["bridge-role"] | EML_OPTION_ROLE_SLAVE;
+#endif
+    if (firmwareOptions.bridge_role > EML_OPTION_ROLE_AUTO)
+        firmwareOptions.bridge_role = EML_OPTION_ROLE_MASTER;
+    firmwareOptions.bridge_traffic_mode = doc["bridge-traffic-mode"] | EML_OPTION_TRAFFIC_RAW;
+    if (firmwareOptions.bridge_traffic_mode > EML_OPTION_TRAFFIC_SBUS)
+        firmwareOptions.bridge_traffic_mode = EML_OPTION_TRAFFIC_RAW;
+    firmwareOptions.bridge_power = doc["bridge-power"] | (uint8_t)EML_DEFAULT_POWER;
+    if (!isSupportedBridgePower(firmwareOptions.bridge_power)) firmwareOptions.bridge_power = 2;
+    firmwareOptions.bridge_dynamic_power = doc["bridge-dynamic-power"] | false;
+    firmwareOptions.bridge_fan_threshold = doc["bridge-fan-threshold"] | 4U;
+    if (!isSupportedBridgePower(firmwareOptions.bridge_fan_threshold)) firmwareOptions.bridge_fan_threshold = 4;
 #endif
 
     builtinOptions.clear();

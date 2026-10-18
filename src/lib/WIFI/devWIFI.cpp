@@ -46,6 +46,10 @@
 #include "WebContent.h"
 
 #include "config.h"
+#if defined(EML_BRIDGE)
+#include "eml_bridge.h"
+#include <MD5Builder.h>
+#endif
 
 #if defined(RADIO_LR1121)
 #include "lr1121.h"
@@ -211,6 +215,147 @@ static void HandleReboot(AsyncWebServerRequest *request)
   scheduleRebootTime(200);
 }
 
+#if defined(EML_BRIDGE)
+static void GetBridgeInfo(AsyncWebServerRequest *request)
+{
+  auto *response = new AsyncJsonResponse();
+  JsonObject json = response->getRoot().to<JsonObject>();
+  json["target"] = (const char *)&target_name[4];
+  json["product"] = product_name;
+  json["device"] = device_name;
+  json["version"] = VERSION;
+  json["commit"] = commit;
+  json["max-power"] = (uint8_t)POWERMGNT::getMaxPower();
+  json["role"] = firmwareOptions.bridge_role;
+  json["active-role"] = (uint8_t)emlBridgeRole();
+  response->setLength();
+  request->send(response);
+}
+
+// Bench diagnostics. Counters keep their values after Wi-Fi stopped the radio, so
+// they describe the search/link before Wi-Fi started. Compare cfg and ids of both nodes.
+static void GetBridgeStatus(AsyncWebServerRequest *request)
+{
+  auto *response = new AsyncJsonResponse();
+  JsonObject json = response->getRoot().to<JsonObject>();
+  char hex[9];
+  const EmlBridgeDiag_s d = emlBridgeDiag();
+  json["uptime-ms"] = millis();
+  json["connection-state"] = (uint8_t)connectionState;
+  json["role"] = d.role;
+  json["mac-mode"] = d.mac_mode;
+  json["session"] = d.session_state;
+  snprintf(hex, sizeof(hex), "%08x", (unsigned)d.configuration_id); json["cfg"] = String(hex);
+  snprintf(hex, sizeof(hex), "%08x", (unsigned)d.last_hello_configuration_id); json["last-hello-cfg"] = String(hex);
+  snprintf(hex, sizeof(hex), "%08x", (unsigned)d.local_id); json["local-id"] = String(hex);
+  snprintf(hex, sizeof(hex), "%08x", (unsigned)d.peer_id); json["peer-id"] = String(hex);
+  JsonArray uid = json["uid"].to<JsonArray>();
+  for (uint8_t i = 0; i < UID_LEN; ++i) uid.add(UID[i]);
+  json["slot-us"] = d.slot_us;
+  json["hops"] = d.hops;
+  json["pll-mask"] = d.pll_mask;
+  json["search-band"] = d.search_band;
+  json["election-phase-ms"] = d.election_phase_ms;
+
+  const EmlMacStats_s &m = emlBridgeMacStats();
+  JsonObject mac = json["mac"].to<JsonObject>();
+  mac["tx"] = m.tx_frames; mac["tx-none"] = m.tx_no_frame; mac["tx-overrun"] = m.tx_overrun;
+  mac["rx"] = m.rx_frames; mac["rx-dropped"] = m.rx_dropped; mac["rx-irq-errors"] = m.rx_irq_errors;
+  mac["acquisitions"] = m.acquisitions; mac["lock-losses"] = m.lock_losses;
+  mac["missed-boundaries"] = m.missed_boundaries; mac["emergency-searches"] = m.emergency_searches;
+  mac["role-changes"] = m.role_changes;
+  mac["search-frames"] = m.search_frames; mac["search-bad-frame"] = m.search_bad_frame;
+  mac["search-not-hello"] = m.search_not_hello; mac["search-id-mismatch"] = m.search_id_mismatch;
+  mac["search-cfg-mismatch"] = m.search_cfg_mismatch; mac["search-late"] = m.search_late;
+  mac["search-off-hop"] = m.search_off_hop; mac["tx-sync-channel"] = m.tx_sync_channel;
+  mac["emergency-handover"] = m.emergency_handover; mac["emergency-timeout"] = m.emergency_timeout;
+  mac["emergency-session-lost"] = m.emergency_session_lost;
+  mac["late-prepares"] = m.late_prepares; mac["sent-unmatched"] = m.sent_unmatched;
+  mac["band-handovers"] = m.band_handovers;
+  mac["late-missed"] = m.late_missed;
+  JsonObject pump = json["pump"].to<JsonObject>();
+  pump["ok"] = m.pump_ok; pump["control"] = m.pump_control; pump["unissued"] = m.pump_unissued;
+  pump["window"] = m.pump_window; pump["flow"] = m.pump_flow; pump["empty"] = m.pump_empty;
+  const EmlTddStats_s &tdd = emlBridgeTddStats();
+  JsonObject td = json["tdd"].to<JsonObject>();
+  td["mode"] = emlBridgeLinkStats().tdd_mode; td["proposed"] = tdd.proposed; td["committed"] = tdd.committed;
+  td["expired"] = tdd.expired; td["timeouts"] = tdd.timeouts; td["rejected"] = tdd.rejected;
+  td["peer-queued"] = emlBridgeTddPeerQueued();
+  JsonObject lp = json["loop"].to<JsonObject>();
+  lp["loops"] = emlLoopStats.loops; lp["commits"] = emlLoopStats.commits;
+  lp["avg-us"] = emlLoopStats.loops ? (uint32_t)(emlLoopStats.total_sum_us / emlLoopStats.loops) : 0;
+  lp["max-us"] = emlLoopStats.total_max_us;
+  lp["drain-max-us"] = emlLoopStats.section_max_us[EML_LOOP_DRAIN];
+  lp["devices-max-us"] = emlLoopStats.section_max_us[EML_LOOP_DEVICES];
+  lp["read-max-us"] = emlLoopStats.section_max_us[EML_LOOP_READ];
+  lp["mac-max-us"] = emlLoopStats.section_max_us[EML_LOOP_MAC];
+  lp["commit-max-us"] = emlLoopStats.section_max_us[EML_LOOP_COMMIT];
+  lp["qos-buffered"] = emlBridgeQosBuffered();
+  lp["heap-free"] = ESP.getFreeHeap();
+  lp["heap-min"] = emlLoopStats.heap_min;
+  lp["ring-bytes"] = (uint32_t)AP_MAX_BUF_LEN;
+  JsonObject search = json["search"].to<JsonObject>();
+  search["sync-channel"] = d.sync_channel;
+  search["rssi-min"] = d.search_rssi_min; search["rssi-max"] = d.search_rssi_max;
+  search["last-off-hop"] = d.last_off_hop; search["last-off-hop-channel"] = d.last_off_hop_channel;
+  search["last-off-hop-rssi"] = d.last_off_hop_rssi;
+  search["last-bad-rssi"] = d.last_bad_rssi; search["last-bad-length"] = d.last_bad_length;
+  static const char digits[] = "0123456789abcdef";
+  char frame[2 * sizeof(d.last_bad_frame) + 1];
+  for (size_t i = 0; i < sizeof(d.last_bad_frame); ++i)
+  {
+    frame[2 * i] = digits[d.last_bad_frame[i] >> 4];
+    frame[2 * i + 1] = digits[d.last_bad_frame[i] & 15];
+  }
+  frame[sizeof(frame) - 1] = 0;
+  search["last-bad-frame"] = String(frame);
+  for (size_t i = 0; i < sizeof(d.last_tx_sync_frame); ++i)
+  {
+    frame[2 * i] = digits[d.last_tx_sync_frame[i] >> 4];
+    frame[2 * i + 1] = digits[d.last_tx_sync_frame[i] & 15];
+  }
+  search["last-tx-sync-length"] = d.last_tx_sync_length;
+  search["last-tx-sync-frame"] = String(frame);
+  for (size_t i = 0; i < sizeof(d.last_invalid_frame); ++i)
+  {
+    frame[2 * i] = digits[d.last_invalid_frame[i] >> 4];
+    frame[2 * i + 1] = digits[d.last_invalid_frame[i] & 15];
+  }
+  JsonObject locked = json["locked"].to<JsonObject>();
+  locked["fast-turnaround"] = d.fast_turnaround;
+  locked["last-invalid-length"] = d.last_invalid_length;
+  locked["last-invalid-rssi"] = d.last_invalid_rssi;
+  locked["last-invalid-offset-us"] = d.last_invalid_offset_us;
+  locked["last-valid-offset-us"] = d.last_valid_offset_us;
+  locked["last-invalid-frame"] = String(frame);
+
+  const EmlTransportStats_s &t = emlBridgeTransportStats();
+  JsonObject tr = json["transport"].to<JsonObject>();
+  tr["transmitted"] = t.transmitted; tr["retransmitted"] = t.retransmitted; tr["received"] = t.received;
+  tr["invalid"] = t.invalid; tr["stale"] = t.stale; tr["sessions-opened"] = t.sessions_opened;
+  tr["session-resets"] = t.session_resets;
+  tr["duplicates"] = t.duplicates; tr["backpressure"] = t.backpressure; tr["ignored-ack"] = t.ignored_ack;
+  tr["out-of-order"] = t.out_of_order; tr["discarded-tx"] = t.discarded_tx; tr["discarded-rx"] = t.discarded_rx;
+  tr["acknowledged-bytes"] = t.acknowledged_bytes; tr["uart-refused"] = t.uart_refused;
+
+  const EmlUartStats_s &u = emlBridgeUartStats();
+  JsonObject uart = json["uart"].to<JsonObject>();
+  uart["read"] = u.read; uart["written"] = u.written; uart["refused"] = u.refused;
+  uart["discarded-disconnected"] = u.discarded_disconnected;
+  uart["input-stalls"] = u.input_stalls; uart["output-stalls"] = u.output_stalls;
+  tr["uart-accepted"] = t.uart_accepted; tr["uart-delivered"] = t.uart_delivered;
+
+  const EmlLinkStats_s l = emlBridgeLinkStats();
+  JsonObject link = json["link"].to<JsonObject>();
+  link["phy"] = l.phy_profile; link["band"] = l.band; link["lq"] = l.lq; link["rssi"] = l.rssi;
+  link["snr"] = l.snr; link["snr-valid"] = l.snr_valid; link["peer-lq"] = l.peer_lq;
+  link["peer-rssi"] = l.peer_rssi; link["fsk-fifo-overruns"] = l.fsk_fifo_overruns;
+  link["fsk-pll-waits"] = l.fsk_pll_waits; link["fsk-pll-timeouts"] = l.fsk_pll_timeouts;
+  response->setLength();
+  request->send(response);
+}
+#endif
+
 static void HandleReset(AsyncWebServerRequest *request)
 {
   if (request->hasArg("hardware")) {
@@ -254,7 +399,7 @@ static void UpdateSettings(AsyncWebServerRequest *request, JsonVariant &json)
 #endif
     if (!isSupportedBridgeBaud(requestedBaud))
     {
-      request->send(400, "text/plain", "Unsupported bridge UART baud rate (allowed: 115200, 230400, 420000, 460800).");
+      request->send(400, "text/plain", "Unsupported bridge UART baud rate (allowed: 57600, 115200, 230400, 420000, 460800).");
       return;
     }
     firmwareOptions.uart_baud = requestedBaud;
@@ -264,6 +409,59 @@ static void UpdateSettings(AsyncWebServerRequest *request, JsonVariant &json)
     json["rcvr-uart-baud"] = requestedBaud;
 #endif
   }
+
+#if defined(EML_BRIDGE)
+  const uint8_t band = json["bridge-default-band"] | firmwareOptions.bridge_default_band;
+  const uint8_t lq = json["bridge-lq-threshold"] | firmwareOptions.bridge_lq_threshold;
+  const uint8_t phy = json["bridge-phy"] | firmwareOptions.bridge_phy;
+  const uint8_t tdd = json["bridge-tdd-mode"] | firmwareOptions.bridge_tdd_mode;
+  const uint8_t role = json["bridge-role"] | firmwareOptions.bridge_role;
+  const uint8_t traffic = json["bridge-traffic-mode"] | firmwareOptions.bridge_traffic_mode;
+  const uint8_t power = json["bridge-power"] | firmwareOptions.bridge_power;
+  const uint8_t fan = json["bridge-fan-threshold"] | firmwareOptions.bridge_fan_threshold;
+  const uint32_t fanRuntime = json["fan-runtime"] | firmwareOptions.fan_min_runtime;
+  if (band >= 4 || lq < 10 || lq > 95 || tdd > EML_OPTION_TDD_ADAPTIVE ||
+      role > EML_OPTION_ROLE_AUTO || traffic > EML_OPTION_TRAFFIC_SBUS ||
+      !isSupportedBridgePower(power) || power > POWERMGNT::getMaxPower() ||
+      !isSupportedBridgePower(fan) || fanRuntime > 600U)
+  {
+    request->send(400, "text/plain", "Invalid EML bridge setting or power exceeds this board's hardware limit.");
+    return;
+  }
+  if (phy == EML_OPTION_PHY_GFSK_500)
+  {
+    request->send(422, "text/plain", "GFSK 500k is reserved but disabled: SX1276 is specified to 300 kbit/s; hardware qualification P5.7 is pending.");
+    return;
+  }
+  if (phy != EML_OPTION_PHY_GFSK_250 && phy != EML_OPTION_PHY_LORA_SF6)
+  {
+    request->send(400, "text/plain", "Unsupported EML PHY profile.");
+    return;
+  }
+  // Same UID derivation as the MY_BINDING_PHRASE build flag; both nodes need the same phrase
+  const char *phrase = json["binding-phrase"] | "";
+  if (phrase[0])
+  {
+    MD5Builder md5;
+    md5.begin();
+    md5.add(String("-DMY_BINDING_PHRASE=\"") + phrase + "\"");
+    md5.calculate();
+    uint8_t digest[16];
+    md5.getBytes(digest);
+    JsonArray uid = json["uid"].to<JsonArray>();
+    for (uint8_t i = 0; i < UID_LEN; ++i) uid.add(digest[i]);
+  }
+  json.remove("binding-phrase");
+  json["bridge-default-band"] = band;
+  json["bridge-lq-threshold"] = lq;
+  json["bridge-phy"] = phy;
+  json["bridge-tdd-mode"] = tdd;
+  json["bridge-role"] = role;
+  json["bridge-traffic-mode"] = traffic;
+  json["bridge-power"] = power;
+  json["bridge-fan-threshold"] = fan;
+  json["fan-runtime"] = fanRuntime;
+#endif
 
   File file = LittleFS.open("/options.json", "w");
   serializeJson(json, file);
@@ -1296,6 +1494,10 @@ static void startServices()
   server.on("/config", HTTP_GET, GetConfiguration);
   server.on("/access", WebUpdateAccessPoint);
   server.on("/firmware.bin", WebUpdateGetFirmware);
+#if defined(EML_BRIDGE)
+  server.on("/bridge-info.json", HTTP_GET, GetBridgeInfo);
+  server.on("/bridge-status.json", HTTP_GET, GetBridgeStatus);
+#endif
 
   server.on("/update", HTTP_POST, WebUploadResponseHandler, WebUploadDataHandler);
   server.on("/update", HTTP_OPTIONS, corsPreflightResponse);

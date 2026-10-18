@@ -183,8 +183,8 @@ P6.0 — незалежне очищення після програмної і�
 
 - [ ] **P8.1** Перевірити таблиці ES900TX для 10/25/50/100/250/500/1000 мВт, APC/DAC та обмеження профілю; не ототожнювати значення enum із виміряною RF-потужністю.
 - [ ] **P8.2** Реалізувати/перевірити 100 мВт PA_BOOST на ES900RX: PA_CONFIG, PA_DAC, OCP і перемикання TX/RX згідно з режимом SX1276.
-- [ ] **P8.3** Передавати метрики RSSI/LQ/PER і доступний SNR у службових повідомленнях EML; не домішувати їх до UART-payload. Для FSK не покладатися на LoRa SNR.
-- [ ] **P8.4** Інтегрувати Dynamic Power з гістерезисом, обмеженнями й визначеною поведінкою при втраті зворотного зв'язку.
+- [x] **P8.3** Передавати метрики RSSI/LQ/PER і доступний SNR у службових повідомленнях EML; не домішувати їх до UART-payload. Для FSK не покладатися на LoRa SNR.
+- [x] **P8.4** Інтегрувати Dynamic Power з гістерезисом, обмеженнями й визначеною поведінкою при втраті зворотного зв'язку.
 - [ ] **P8.5** Перевірити GPIO17 вентилятора TX, увімкнення від 250 мВт, мінімальний час роботи й налаштування порога; використовувати вимірювання температури лише якщо відповідний датчик реально доступний.
 - [ ] **P8.6** Виміряти вихідну потужність, струм живлення й нагрівання на всіх підтримуваних рівнях та робочих частотах; зафіксувати обмеження RF-тракту й охолодження.
 - [ ] **P8.7** Розробити легкий мінімалістичний Wi-Fi WebUI (чистий ванільний HTML5/CSS/JS без важких фреймворків Vite/Vue) зі збереженням 100% функціоналу та інтеграцією параметрів форку:
@@ -209,8 +209,8 @@ P6.0 — незалежне очищення після програмної і�
 Залежності: програмні частини етапів 1–8; апаратні вимірювання — на етапі 10. Результат: прискорений turnaround радіо, вирівнювання MAVLink-кадрів, пріоритезація критичних команд та універсальна прошивка з вибором ролі Master/Slave.
 
 - [ ] **P9.1** Реалізувати прискорений синтезатор частоти SX1276 (Fast Turnaround): оптимізувати послідовність регістрів перемикання між TX і RX через проміжний стан FSTX/FSRX, зменшити час переходу синтезатора з ~300–400 мкс до 150–200 мкс та скорегувати guard time слотів для вивільнення додаткового ефірного часу.
-- [ ] **P9.2** Реалізувати вирівнювання меж кадрів MAVLink (Frame Boundary Packing): пакувати цілісні повідомлення MAVLink2 (починаючи з магічного байта `0xFD`) у межі одного кадру `EML_Frame` без штучного дроблення на стику слотів, що скорочує затримку обробки в наземній станції (GCS) і усуває «рвані» пакети при одиничних втратах.
-- [ ] **P9.3** Реалізувати дворівневу чергу з пріоритезацією трафіку (QoS для MAVLink / SBUS): виділити окрему чергу високого пріоритету (High Priority) для критичних команд керування (пакети SBUS, `MANUAL_CONTROL`, `COMMAND_LONG`), які передаються в першому ж доступному TDD-слоті поза чергою потокової телеметрії.
+- [x] **P9.2** Реалізувати вирівнювання меж кадрів MAVLink (Frame Boundary Packing): пакувати цілісні повідомлення MAVLink2 (починаючи з магічного байта `0xFD`), що вміщуються в payload `EML_Frame` (до 60 байтів для N=64), без штучного дроблення на стику слотів. Довші валідні MAVLink2 frames (wire-максимум 280 байтів) передавати без втрат послідовними EML-фрагментами, оскільки вони фізично не вміщуються в один кадр.
+- [x] **P9.3** Реалізувати дворівневу чергу з пріоритезацією трафіку (QoS для MAVLink / SBUS): виділити окрему чергу високого пріоритету (High Priority) для критичних команд керування (пакети SBUS, `MANUAL_CONTROL`, `COMMAND_LONG`), які передаються в першому ж доступному TDD-слоті поза чергою потокової телеметрії. Режим має бути явним opt-in, щоб raw transport за замовчуванням не змінював порядок байтів.
 - [ ] **P9.4** Реалізувати уніфіковану прошивку з вибором ролі Master/Slave: забезпечити єдиний бінарний образ прошивки для пристроїв, де роль (Master-TX чи Slave-RX) обирається перемикачем у WebUI (або автоматично за наявністю активного сигналу Master в ефірі при старті).
 
 ## Етап 10. Приймальні випробування та документація
@@ -274,6 +274,17 @@ P6.0 — незалежне очищення після програмної і�
 | 2026-10-18 | P7.4 | Реалізовано EmlTransport<N,W>, W=1…4: TX metadata над початковим ring, RX reorder buffer, cumulative ACK тільки переданого префікса, retry найстарішого пропуску, урахування reorder у backpressure. Виправлено знайдене довгим прогоном зависання buffered head після паузи UART; окремий regression перевіряє просування ACK при drain. W=5 відхиляється static_assert; перевірено напівпростір sequence, unsent ACK, session/CRC, 16/32-bit wrap і багато seq-wrap. Native-вимірювання обґрунтовує W4 для burst-розкладу: без втрат N64 forward FSK 9664 проти 7299 B/s (+32,4%), LoRa 2304 проти 1681 (+37,0%); adaptive W1 ≈3736/861 B/s. Це модель, а не виміри RF. Безвтратний symmetric/interactive має зафіксовані витрати; фізичне підтвердження — P7.5. |
 | 2026-10-18 | P7.5 (частково, відкрито) | Виконано 192 модельні сценарії (4 PHY/N ×2 loss ×6 навантажень ×4 W/mode), normal і ASan/UBSan: точний порядок усіх прийнятих байтів, throughput/p50/p95/p99/retries у JSON+CSV. Додано benchmark_bridge_uart.py для двох фізичних портів; 6 PTY self-tests PASS, негативний CRC-контроль правильно дає FAIL. У сесії доступні лише системні ttyS0/ttyAMA10 без ідентифікованих ES900/CP2102, фізичних вимірювань немає. Повний native 244/244, selected ASan/UBSan 54/54, Bridge TX/RX SUCCESS; статичні memory/ISR результати нижче. Для закриття потрібні реальні UART/RF latency/throughput/retries, перевірка PHY/бендів та runtime heap/stack/ISR/CPU. |
 | 2026-10-18 | Порядок перевірок P1–P10 | За вказівкою користувача випробування на залізі перенесено на завершальний етап 10. Уточнено залежності P7–P10: програмна робота продовжується після програмних передумов; апаратні та змішані пункти залишаються відкритими до вимірювань. ID, критерії приймання та чекбокси збережено. Зміна лише плану; код, PHY, ToA й часові бюджети не змінено. Перевірки: `git diff --check` — PASS; обидві Bridge-збірки й ELF-аудит — PASS. TX RAM/IRAM 61 352/85 420 B (IRAM вільно 45 652 B); RX 43 708/33 581 B (вільно 15 571 B), без змін щодо P7. Логи `.venv/build-logs/hardware-at-end-es900{tx,rx}.log`, аудити поруч. |
+| 2026-10-18 | P8.3–P8.4 | Додано двобічні session-bound EML LINK_STATUS: PHY/LQ/PER/RSSI та SNR лише з явним valid-бітом для LoRa; FSK SNR не використовує. Метрики не потрапляють у UART-кільця. Dynamic Power працює за peer feedback, має швидкий підйом, 5-секундний down-hold, межі плати/налаштованого максимуму та fail-safe на максимум після 2 с без feedback. Native `test_eml_power` перевіряє wire roundtrip, signed RSSI/SNR, FSK без SNR, гістерезис, rate limit, clamp, feedback loss і disabled mode; EML subset 70/70, повний native 248/248 PASS. Обидва пункти виконано програмно; фізичну RF-поведінку перевірити на етапі 10. |
+| 2026-10-18 | P8.1–P8.2, P8.5, P8.7–P8.9 (програмна частина; відкрито) | Проведено аудит ES900TX APC-кодів без ототожнення з RF dBm; для ES900RX додано 100 мВт через PA_CONFIG=0x8F, PA_DAC=0x87/0x84, OCP=150 мА. GPIO17 fan працює в обох ролях ESP32 від налаштованого порога (типово 250 мВт) із мінімальним runtime; температурний датчик не заявлено. Додано vanilla Bridge WebUI (після P9 — 2588 B gzip), `/bridge-info.json`, OTA progress, усі безпечні P8 settings; GFSK500 видимий, але відхиляється до P5.7. Додано `HappyModel_ES900RX_as_TX_Bridge` і `HappyModel_ES900TX_as_RX_Bridge`; усі 4 таргети SUCCESS та build/IRAM audit PASS, ESP8285 coordinator має 16 003 B вільної IRAM. Деталі в `docs/EML_POWER_WEBUI.md`. Чекбокси лишаються відкритими до прошивки, pair/WebUI/OTA/fan/RF/thermal перевірок на реальному обладнанні. P8.6 не виконано. |
+| 2026-10-18 | P9.2–P9.3 | Додано opt-in `Raw`/`MAVLink2`/`SBUS` ingress. MAVLink2 parser зберігає межі frame, включно з 13-байтовим signature; frames до EML payload передаються одним DATA, довші до 280 B — послідовними фрагментами без втрати й без вставлення priority frame усередину фрагментованого повідомлення. Окрема bounded high-priority lane випереджає telemetry для MAVLink message IDs 69/76 та валідних 25-byte SBUS frames; parser timeout випускає malformed/incomplete candidate як raw bytes. Raw лишається default і не переставляє байти. `test_eml_qos` 5/5, повний native 253/253 PASS. |
+| 2026-10-18 | P9.1, P9.4 (програмна частина; відкрито) | SX1276 TDD-перехід переведено на Standby→FRF→FSTX/FSRX з перекриттям PLL lock і FIFO/RF-switch роботи; `SetMode()` тепер зберігає LongRangeMode. До осцилографа збережено 500 мкс turnaround і чинні slot intervals. Роль Master/Slave стала runtime WebUI option із reboot apply; кожен стандартний образ ES900TX/ES900RX містить обидві MAC-гілки, альтернативні env збережено. Потрібен спільний UID і протилежні ролі. Чотири build та audit PASS; фізичні turnaround і same-image pair/role-switch тести відкладено до P10, тому P9.1/P9.4 не закрито. Деталі в `docs/EML_QOS_ROLE.md`. |
+| 2026-10-18 | P9.4 (програмна частина; доопрацювання, відкрито) | Виправлено runtime-роль на стандартних образах: `hwTimer` для `EML_BRIDGE` обирає режим за наявністю tick callback (координатор — tock-only, респондер — tick/tock із phase shift і негайним першим tock), а не за `TARGET_TX`/`TARGET_RX`. Раніше ES900RX-образ у ролі Master викликав нульовий tick callback у timer ISR, а ES900TX-образ у ролі Slave ігнорував phase shift і стартував на слот пізніше. Штатні ELRS-збірки зберігають compile-time вибір. Додано `bridge-role=2` (Auto): прослуховування Master з утриманням band search на default band, потім advertise, чергування до сесії; фази `R+D+k·D` / `2R+D+k·D`, k∈0..7 від RNG і MAC чипа (`eml_role.h`). WebUI показує `active-role`, gzip 2630 B. Native 258/258, чотири Bridge build і audit PASS, штатні `Unified_ESP8285_900_RX_via_UART` і `Unified_ESP32_900_TX_via_UART` — SUCCESS. Фізичної перевірки Auto та same-image пар не було; P9.4 не закрито. Деталі — `docs/EML_QOS_ROLE.md`. |
+| 2026-10-18 | P8.8 (стенд, частково; відкрито) | Перша прошивка на залізі: 2× BAYCKRC 900MHz Nano RX (штатно ELRS B3.3.0 ae9df3, layout `Generic 900` — як ES900RX, тому використано ES900RX Bridge-образи). Модуль Master (ESP8285N08, MAC ec:94:cb:ab:c6:f1) через PL2303/COM12: резервна копія штатної flash 1 MiB, erase-flash, запис `HappyModel_ES900RX_as_TX_Bridge` (UID з тестової binding phrase, hash verified). Підтверджено старт, Wi-Fi AP і новий WebUI. Знайдено: у RX-as-TX LED не працював, бо `Unified_ESP8285_TX.h` брав лише `led_red`, а RX layout задає `led` (GPIO16); додано fallback як у ESP32 TX, чиста збірка +352 B Flash, audit PASS. Помічено, що PlatformIO не перебудовує об'єкти після зміни `-include` target header — потрібна чиста збірка. RF-лінк, Slave, TDD і throughput ще не перевірені. |
+| 2026-10-18 | P8.8, P5.6, P9.3 (стенд 2× BAYCK Nano RX; відкрито) | Додано WebUI-діагностику `/bridge-status.json` (MAC/search/transport/UART/TDD лічильники, сирий битий кадр, cfg/ID/UID), поле binding phrase (UID = MD5 як у `MY_BINDING_PHRASE`), кнопку 5 с → Wi-Fi для всіх ролей Bridge і постійний LED у connected (без RC model match). **FSK250/64:** Slave приймає HELLO на каналі рандеву, але ~88% кадрів мають поодинокі бітові помилки (приклад: 1 біт у receiver-id) при RSSI −38…−11 dBm; сесія встановлюється й рветься — PHY-проблема FSK, P5.6 не пройдено. **LoRa BW500 SF6/64**, 10 мВт, 2–3 м: LQ 100%, invalid 42–45 з ~8000, 0 повторів. **Знайдено й виправлено P9.3:** у Raw кожна UART-порція ставала окремим QoS-пакетом (один пакет на EML-кадр, ліміт 44 пакети) → кадри по кілька байтів і мовчазне відкидання прочитаних байтів; тепер Raw зливає порції, а `free()` зупиняє UART до вичерпання слотів пакетів (+2 native-тести, 260/260). Після фіксу 500 B/s в обидва боки 30 с — 0 втрат/дублікатів/перестановок, p50 149/308 мс. Корисна стеля без втрат ≈700 B/s M→S і ≈350 B/s S→M проти моделі ≈2300 B/s — причина досліджується. Без апаратного керування потоком перевищення стелі переповнює UART-буфер модуля (очікувано). |
+| 2026-10-18 | P7.5, P8.8 (стенд; відкрито) | Статуси під насиченням показали `sent-unmatched` ≈50% TX (1652/3273, 1866/3470), `duplicates` 224/289, `ignored-ack` 278/214 і 2 зайві band handover при LQ 100%: гонка в `emlBridgeLoop` — TX-квитанції забиралися лише на кроці 1, а межа слота посеред ітерації запускала ранню підготовку наступного own-слота, яка перезаписувала transport ticket. Виправлено `drainTxReports()` перед кожним RX і перед підготовкою (ISR публікує межу після push квитанції). LoRa BW500 SF6/64, 10 мВт, 2–3 м після фіксу: M→S без втрат 500/1100/1600 B/s (p50 84/85/186 мс, 1604 B/s ≈ розрахункові 1685 B/s); S→M без втрат 500 B/s (p50 83 мс), 1100 B/s — 10 записів втрачено (p50 484 мс), 1600 B/s — насичення. Асиметрія досліджується (diag5: час циклу, commits, QoS/TDD backlog). |
+| 2026-10-18 | P8.8, P3.5 (стенд; відкрито) | diag5: цикл 105–136 мкс у середньому, 0 config commit, `sent-unmatched` 0 — гонка усунена. S→M упирається у ≈1036 B/s: Slave кладе нову DATA лише в ~60% own-слотів, при 1100 B/s ~6% вхідних байтів губляться в 256-байтовому RX-буфері UART. Знайдено помилку P8.8: `AP_MAX_BUF_LEN` для ESP8285 у ролі Master (TARGET_TX) був 64 B на напрямок (макрос давав 4096 лише ESP32 TX і 1024 RX), тож прийом Master мав одну DATA місця й часто сигналізував PAUSE (`backpressure` 94). Для `EML_BRIDGE` розмір тепер за MCU: ESP32 4096, ESP8285 2048 B на напрямок; UART RX-буфер ESP8285 256→1024 B, ESP32 4096 B; у Status додано heap-free/heap-min і лічильники причин відмови насоса QoS. RAM ESP8285: Master 45 368→49 376, Slave 47 320→49 408 B; ESP32 TX 63 288 B; audit PASS. Апаратна перевірка — наступний прогін. |
+| 2026-10-18 | P7.5, P8.8 (стенд; відкрито) | Після виправлення буферів, LoRa BW500 SF6/64, 10 мВт, 2–3 м: M→S 1100/1600 B/s без втрат (p50 118/124 мс, 1604 B/s); S→M 1100 B/s без втрат (p50 120 мс), 1400 B/s 20 с — 418/418 записів без втрат (p50 131, max 313 мс); 1600 B/s — 1403 B/s, переповнення входу (стеля Slave нижча через ~12,5% службових слотів). Adaptive TDD не вмикався: контролер бачив лише transport.queuedTx(), а backlog чекає в QoS — передано повний backlog. Для FSK додано обмежене очікування PllLock перед TX/RX із FSTX/FSRX і лічильники fsk-pll-waits/timeouts для перевірки гіпотези бітових помилок. Native 260/260, audit PASS. |
+| 2026-10-18 | P7.5, P5.6, P9.1 (стенд; відкрито) | Adaptive TDD із повним backlog (transport + QoS), LoRa/64: однобічно M→S 2000 B/s і S→M 2000 B/s без втрат (p50 91/94 мс), M→S насичення 2251 B/s (модель P7 — 2304). FSK250/64, Band 2, fallback off, з очікуванням PllLock: `fsk-pll-waits` 272/1131 при 0 timeouts — PLL справді часто не був захоплений на вході TX/RX, але в locked-режимі 100% кадрів invalid (3602/3634, received 0), у search 1 з 3 HELLO валідний (1 acquisition); битий кадр — перші байти майже правильні, далі шум. Heap з Wi-Fi: 13,4–14,6 КБ. FSK ніколи не перевірявся без P9.1 fast turnaround: додано `EML_FAST_TURNAROUND` (1 типово; стенд 0 — Standby→FRF, TX/RX запускає власну FS/PLL-послідовність чипа) та захоплення останнього invalid-кадру й RX offset у locked-режимі. |
 
 Контрольні збірки P2.1:
 
@@ -487,3 +498,110 @@ IRAM — ELF `_iram_end - _iram_start` (TX), `_text_end - _text_start` (RX). В�
 - Обидва кінцеві ELF/bin пройшли `audit_bridge_build.py`: LittleFS/options.json/HTTP recovery, TX THERMAL та EML збережено, RC-баласт відсутній. RX ISR graph — 36 функцій, прямих flash/heap/logging викликів немає, усі 4 непрямі виклики — ROM. PHY-профілі та інтервали не змінено; новий ACK4 FSK250 має ToA 576 мкс і бюджет 2126 <3100 мкс. ToA експериментального FSK300 уточнено за фактичним RegBitrateFrac: ACK4 481 мкс, N64 2081 мкс (бюджет 3631 <3700 мкс).
 
 Артефакти: `.venv/artifacts/p7/es900tx/`, `es900rx/` (.bin/.elf/hardware/options/audit), `build-manifest.json` із SHA256 джерел та образів, `es900rx-isr-audit.json`, `native-benchmark*.json/.csv`, `uart-tool-self-test.json`, `uart-tool-corruption-control.json`, `window-limit-negative.log`. Логи: `.venv/build-logs/p7-native.log`, `p7-sanitized.log`, `p7-es900tx.log`, `p7-es900rx.log`, `p7-stock-rx.log`, `p7-benchmark*.log`, `p7-uart-tool.log`. Артефакти локальні, не входять у Git. **P7.5 і апаратні передумови P4.7/P5.6/P6.6 не позначено виконаними.**
+
+
+Контрольні перевірки P8.1–P8.9 (програмна частина, 2026-10-18):
+
+Повний технічний опис, регістрові таблиці, Dynamic Power policy, WebUI та межі
+верифікації наведено в `docs/EML_POWER_WEBUI.md`. Метрики LINK_STATUS займають
+по одному службовому anchor кожної сторони на 64 слоти: разом 3,125% слотів.
+Фізичний N, bitrate, ToA та interval не змінено, тому часові бюджети P7 лишаються
+чинними; новий розрахунок ToA не потрібен.
+
+| Таргет | RAM, байтів | Flash, байтів | IRAM, байтів | Вільна IRAM, байтів |
+| --- | ---: | ---: | ---: | ---: |
+| `HappyModel_ES900TX_Bridge` | 61 376 / 327 680 | 1 061 813 / 1 966 080 | 85 560 / 131 072 | 45 512 |
+| `HappyModel_ES900RX_Bridge` | 44 128 / 81 920 | 466 304 / 991 216 | 33 761 / 49 152 | 15 391 |
+| `HappyModel_ES900RX_as_TX_Bridge` | 42 168 / 81 920 | 465 996 / 991 216 | 33 149 / 49 152 | 16 003 |
+| `HappyModel_ES900TX_as_RX_Bridge` | 54 912 / 327 680 | 1 044 365 / 1 966 080 | 85 568 / 131 072 | 45 504 |
+
+Перевірки:
+
+- Повний native — **248/248 PASS**; EML subset — **70/70 PASS**, з них новий `test_eml_power` 4/4:
+  LINK_STATUS encode/decode, signed RSSI/SNR, FSK SNR-invalid, Dynamic Power
+  hysteresis/limits/lost feedback/disabled та регістрова політика RX +20 dBm.
+- Чотири фінальні PlatformIO build — SUCCESS. Build audit кожного ELF/bin — PASS:
+  правильний Bridge entry point, EML ISR, LittleFS/options/OTA/reboot, відсутність
+  RC-баласту, IRAM roots у правильному сегменті. ESP8285 TX-role має 16 003 B
+  вільної IRAM проти вимоги >=5 KiB. Embedded hardware layout збігається для
+  звичайної та альтернативної ролі відповідної фізичної плати.
+- WebUI — один deterministic gzip asset **2588 B** (<5 KiB), без Vue/Vite/runtime
+  framework. `/options.json` валідує baud/power/PHY/band/TDD; GFSK500 повертає
+  HTTP 422 до апаратної кваліфікації, замість некоректного обходу межі SX1276.
+- `git diff --check` — PASS. Локальні audit JSON/SHA256: `.venv/artifacts/p8/`;
+  вони не входять у Git.
+
+Фізичні пристрої в цій сесії не прошивалися. Через це P8.1, P8.2, P8.5,
+P8.7, P8.8, P8.9 та повністю апаратний P8.6 залишено відкритими до етапу 10:
+потрібні conducted RF/current/temperature sweep, GPIO17 fan, WebUI/OTA/recovery,
+осцилограф TDD і двобічні pair-тести для ES900TX↔ES900RX, 2×RX та 2×TX.
+
+
+Контрольні перевірки P9.1–P9.4 (програмна частина, 2026-10-18):
+
+Повний опис fast-turnaround sequence, MAVLink/SBUS packing, QoS ordering і runtime
+role наведено в `docs/EML_QOS_ROLE.md`. PHY, фізична довжина кадру та slot interval
+не змінювалися. Попри FSTX/FSRX оптимізацію, до вимірювання на DIO/RF збережено
+`EML_TURNAROUND_US=500` і guard 300 мкс:
+
+| PHY / N | ToA, мкс | Turnaround | RX done | Processing | Guard | Slot | Запас |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| LoRa / 64 | 16 032 | 500 | 200 | 600 | 300 | 17 800 | 168 |
+| LoRa / 32 | 8 992 | 500 | 200 | 600 | 300 | 10 600 | 8 |
+| FSK250 / 64 | 2 496 | 500 | 150 | 600 | 300 | 4 100 | 54 |
+| FSK250 / 32 | 1 472 | 500 | 150 | 600 | 300 | 3 100 | 78 |
+
+| Таргет | RAM, байтів | Flash, байтів | IRAM, байтів | Вільна IRAM, байтів |
+| --- | ---: | ---: | ---: | ---: |
+| `HappyModel_ES900TX_Bridge` | 62 488 / 327 680 | 1 065 281 / 1 966 080 | 85 756 / 131 072 | 45 316 |
+| `HappyModel_ES900RX_Bridge` | 45 272 / 81 920 | 469 104 / 991 216 | 34 057 / 49 152 | 15 095 |
+| `HappyModel_ES900RX_as_TX_Bridge` | 43 324 / 81 920 | 468 972 / 991 216 | 33 369 / 49 152 | 15 783 |
+| `HappyModel_ES900TX_as_RX_Bridge` | 56 016 / 327 680 | 1 047 517 / 1 966 080 | 85 836 / 131 072 | 45 236 |
+
+Перевірки:
+
+- Повний native — **253/253 PASS**. `test_eml_qos` перевіряє MAVLink frame boundary
+  між UART batches, пріоритет COMMAND_LONG, 280-byte signed frame без втрат,
+  parser timeout, SBUS high-priority, незмінний raw-order та заборону вставлення
+  priority frame всередину вже розпочатого довгого повідомлення.
+- Чотири PlatformIO build — SUCCESS; чотири `audit_bridge_build.py` — PASS.
+  Мінімум вільної ESP8285 IRAM — 15 095 B, вище вимоги 5 KiB.
+- WebUI gzip — **2588 B**; `bridge-role` і `bridge-traffic-mode` проходять server-side
+  validation та зберігаються в `/options.json`.
+- Фізичні пристрої не прошивалися. P9.1 потребує вимірювання Standby/FSTX/FSRX→RF
+  на крайніх hop/band і обох PHY до зменшення turnaround/guard. P9.4 потребує
+  same-image flash, WebUI role switch/reboot і pair-тестів 2×RX/2×TX; пункти відкриті.
+
+
+Контрольні перевірки доопрацювання P9.4 (2026-10-18):
+
+PHY, фізична довжина кадру, ToA та slot interval не змінювалися, тому часові
+бюджети P9.1 лишаються чинними. Фази Auto для 60 каналів (D — dwell координатора на
+бенд, R = 5D): FSK250/64 — listen 6,1–13,2 с, advertise 11,2–18,3 с; LoRa/64 —
+26,5–57,4 с і 48,6–79,5 с. Auto знаходить фіксований Master за ≤ R (5,1 / 22,1 с),
+фіксований Slave — за ≤ 23,4 / 101,5 с. Для Auto↔Auto модель `test_eml_role` на 2000
+прогонах дає середнє 15,6 с і найгірше 182 с для FSK (LoRa — 69,3 / 790 с), тому
+для детермінованого старту рекомендовано фіксувати роль хоча б на одному боці.
+
+| Таргет | RAM, байтів | Flash, байтів | IRAM, байтів | Вільна IRAM, байтів |
+| --- | ---: | ---: | ---: | ---: |
+| `HappyModel_ES900TX_Bridge` | 62 984 / 327 680 | 1 066 581 / 1 966 080 | 85 912 / 131 072 | 45 160 |
+| `HappyModel_ES900RX_Bridge` | 45 760 / 81 920 | 469 820 / 991 216 | 34 109 / 49 152 | 15 043 |
+| `HappyModel_ES900RX_as_TX_Bridge` | 43 812 / 81 920 | 469 852 / 991 216 | 33 521 / 49 152 | 15 631 |
+| `HappyModel_ES900TX_as_RX_Bridge` | 56 496 / 327 680 | 1 048 701 / 1 966 080 | 85 872 / 131 072 | 45 200 |
+
+Перевірки:
+
+- Повний native — **258/258 PASS**, з них новий `test_eml_role` 5/5: фіксовані ролі,
+  межі фаз Auto, hold/restart, покриття жеребкування та модель зустрічі Auto↔Auto,
+  Auto↔Master, Auto↔Slave.
+- Чотири Bridge build — SUCCESS; чотири `audit_bridge_build.py` — PASS. На обох ESP8285
+  `hwTimer::callback/resume`, `emlTimerTock/Tick` у IRAM, вказівники callback — у DRAM.
+  Мінімум вільної ESP8285 IRAM — 15 043 B (вимога >= 5 KiB).
+- Штатні `Unified_ESP8285_900_RX_via_UART` (Flash 561 494 B) і
+  `Unified_ESP32_900_TX_via_UART` (Flash 1 617 753 B) з FCC915 — SUCCESS.
+- WebUI gzip — **2630 B**; `bridge-role` 0..2 валідується в `/options.json`.
+- `git diff --check` — PASS. Логи: `.venv/build-logs/p9role-*.log`; audit JSON:
+  `.venv/artifacts/p9-role/`.
+- Фізичні пристрої не прошивалися. Потрібні same-image пари 2×RX/2×TX з обома
+  фіксованими ролями та Auto↔Auto/Auto↔fixed на ефірі; P9.4 лишається відкритим.

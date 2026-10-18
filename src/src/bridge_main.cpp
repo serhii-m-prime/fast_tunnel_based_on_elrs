@@ -59,12 +59,18 @@ static void setupSerial()
 #if defined(PLATFORM_ESP32)
     Serial.end();
     esp_log_level_set("*", ESP_LOG_NONE);
+    // Absorbs UART bursts while the radio queue is full (no hardware flow control)
+    Serial.setRxBufferSize(4096);
     Serial.begin(firmwareOptions.uart_baud, SERIAL_8N1, U0RXD_GPIO_NUM, U0TXD_GPIO_NUM, false);
-    uart_set_line_inverse(0, UART_SIGNAL_INV_DISABLE);
+    uart_set_line_inverse(0, firmwareOptions.bridge_uart_inverted ?
+        (UART_SIGNAL_RXD_INV | UART_SIGNAL_TXD_INV) : UART_SIGNAL_INV_DISABLE);
 #else
     uart_set_debug(UART_NO);
     system_set_os_print(0);
-    Serial.begin(firmwareOptions.uart_baud, SERIAL_8N1, SERIAL_FULL, 1, false);
+    // Default 256 B overflowed while the QoS queue was full; heap-allocated
+    Serial.setRxBufferSize(1024);
+    Serial.begin(firmwareOptions.uart_baud, SERIAL_8N1, SERIAL_FULL, 1,
+                 firmwareOptions.bridge_uart_inverted);
 #endif
     Serial.setDebugOutput(false);
     Serial.setTimeout(0);
@@ -77,13 +83,9 @@ static void setupSerial()
 
 static void applyPower()
 {
-    PowerLevels_e power = (PowerLevels_e)config.GetPower();
-#if defined(TARGET_RX)
-    // PWR_MATCH_TX requires the removed CRSF telemetry. EML power feedback is
-    // P8.3/P8.4; retain the old startup fallback for this persisted setting.
-    if (power == PWR_MATCH_TX)
-        power = POWERMGNT::getDefaultPower();
-#endif
+    PowerLevels_e power = (PowerLevels_e)firmwareOptions.bridge_power;
+    if (power < POWERMGNT::getMinPower()) power = POWERMGNT::getMinPower();
+    if (power > POWERMGNT::getMaxPower()) power = POWERMGNT::getMaxPower();
     POWERMGNT::setPower(power);
 }
 
@@ -144,21 +146,23 @@ void setup()
 #endif
     config.Load();
 
-#if defined(TARGET_TX)
     if (firmwareOptions.hasUID)
         memcpy(UID, firmwareOptions.uid, UID_LEN);
     else
     {
+#if defined(TARGET_RX)
+        if (config.GetIsBound())
+            memcpy(UID, config.GetUID(), UID_LEN);
+        else
+#endif
+        {
 #if defined(PLATFORM_ESP32)
-        esp_read_mac(UID, ESP_MAC_WIFI_STA);
+            esp_read_mac(UID, ESP_MAC_WIFI_STA);
 #else
-        wifi_get_macaddr(STATION_IF, UID);
+            wifi_get_macaddr(STATION_IF, UID);
 #endif
+        }
     }
-#else
-    if (config.GetIsBound())
-        memcpy(UID, config.GetUID(), UID_LEN);
-#endif
     // Keep the same pair identity and FHSS seed as before the cleanup.
     FHSSrandomiseFHSSsequence(OtaGetUidSeed());
     setupTargetCommon();
@@ -172,41 +176,73 @@ void setup()
     {
         POWERMGNT::init();
         applyPower();
+        // Radio.Begin() leaves SX1276 in Standby. Apply PA_CONFIG/PA_DAC/OCP
+        // before the first EML slot; later Dynamic Power changes use TX-done.
+        Radio.ApplyOutputPowerAtIdle();
         emlBridgeBegin();
         radioReady = connectionState != radioFailed;
     }
 
     // Air binding is absent in EML. Wi-Fi registers its recovery action itself.
     registerButtonFunction(ACTION_RESET_REBOOT, resetConfigAndReboot);
+    // No RC model exists: a connected link is never a model mismatch (LED)
+    connectionHasModelMatch = true;
 #if defined(TARGET_TX)
     registerButtonFunction(ACTION_INCREASE_POWER, cyclePower);
 #endif
     devicesStart();
 }
 
+EmlLoopStats_s emlLoopStats = {};
+
+static uint32_t loopSection(uint8_t section, uint32_t since)
+{
+    const uint32_t now = micros();
+    if (now - since > emlLoopStats.section_max_us[section]) emlLoopStats.section_max_us[section] = now - since;
+    return now;
+}
+
 void loop()
 {
+    const uint32_t start = micros();
+    uint32_t t = start;
     const unsigned long now = millis();
     if (uartReady)
         emlBridgeDrainSerial(Serial);
+    t = loopSection(EML_LOOP_DRAIN, t);
     devicesUpdate(now);
     checkRebootTime(now);
     executeDeferredFunction(micros());
+    t = loopSection(EML_LOOP_DEVICES, t);
     if (uartReady)
         emlBridgeReadSerial(Serial);
+    t = loopSection(EML_LOOP_READ, t);
 
-    if (connectionState > MODE_STATES)
-        return;
-    emlBridgeLoop();
-    if (config.IsModified())
+    if (connectionState <= MODE_STATES)
     {
-        emlBridgeSuspend(true);
-        const uint32_t changes = config.Commit();
-        if (radioReady)
-            applyPower();
-        emlBridgeSuspend(false);
-        devicesTriggerEvent(changes);
+        emlBridgeLoop();
+        t = loopSection(EML_LOOP_MAC, t);
+        if (config.IsModified())
+        {
+            ++emlLoopStats.commits;
+            emlBridgeSuspend(true);
+            const uint32_t changes = config.Commit();
+            if (radioReady)
+                applyPower();
+            emlBridgeSuspend(false);
+            devicesTriggerEvent(changes);
+            t = loopSection(EML_LOOP_COMMIT, t);
+        }
     }
+    const uint32_t total = micros() - start;
+    if ((emlLoopStats.loops & 255U) == 0)
+    {
+        const uint32_t heap = ESP.getFreeHeap();
+        if (!emlLoopStats.heap_min || heap < emlLoopStats.heap_min) emlLoopStats.heap_min = heap;
+    }
+    ++emlLoopStats.loops;
+    emlLoopStats.total_sum_us += total;
+    if (total > emlLoopStats.total_max_us) emlLoopStats.total_max_us = total;
 }
 
 #endif // EML_BRIDGE

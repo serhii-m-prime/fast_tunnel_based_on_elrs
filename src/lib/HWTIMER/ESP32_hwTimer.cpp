@@ -25,10 +25,10 @@ static portMUX_TYPE isrMutex = portMUX_INITIALIZER_UNLOCKED;
 void ICACHE_RAM_ATTR hwTimer::init(void (*callbackTick)(), void (*callbackTock)())
 {
 
+    hwTimer::callbackTick = callbackTick;
+    hwTimer::callbackTock = callbackTock;
     if (!timer)
     {
-        hwTimer::callbackTick = callbackTick;
-        hwTimer::callbackTock = callbackTock;
         timer = timerBegin(0, (APB_CLK_FREQ / 1000000 / HWTIMER_TICKS_PER_US), true);
         timerAttachInterrupt(timer, hwTimer::callback, true);
         DBGLN("hwTimer Init");
@@ -51,9 +51,12 @@ void ICACHE_RAM_ATTR hwTimer::resume()
     {
         // The timer must be restarted so that the new timerAlarmWrite() period is set.
         timerRestart(timer);
-#if defined(TARGET_TX)
-        timerAlarmWrite(timer, HWtimerInterval, true);
-#else
+        if (HWTIMER_TOCK_ONLY())
+        {
+            timerAlarmWrite(timer, HWtimerInterval, true);
+        }
+        else
+        {
         // We want the timer to fire tock() ASAP after enabling
         // tock() should always be the first event to maintain consistency
         isTick = false;
@@ -62,7 +65,7 @@ void ICACHE_RAM_ATTR hwTimer::resume()
         // Unlike the 8266 timer, the ESP32 timer can be started without delay.
         // It does not interrupt the currently running IsrCallback(), but triggers immediately once it has completed.
         timerAlarmWrite(timer, 0 * HWTIMER_TICKS_PER_US, true);
-#endif
+        }
         running = true;
         timerAlarmEnable(timer);
         DBGLN("hwTimer resume");
@@ -95,9 +98,12 @@ void ICACHE_RAM_ATTR hwTimer::callback(void)
     if (running)
     {
         portENTER_CRITICAL_ISR(&isrMutex);
-#if defined(TARGET_TX)
-        callbackTock();
-#else
+        if (HWTIMER_TOCK_ONLY())
+        {
+            callbackTock();
+            portEXIT_CRITICAL_ISR(&isrMutex);
+            return;
+        }
         uint32_t NextInterval = (HWtimerInterval >> 1) + FreqOffset;
         if (hwTimer::isTick)
         {
@@ -112,7 +118,6 @@ void ICACHE_RAM_ATTR hwTimer::callback(void)
             hwTimer::callbackTock();
         }
         hwTimer::isTick = !hwTimer::isTick;
-#endif
         portEXIT_CRITICAL_ISR(&isrMutex);
     }
 }

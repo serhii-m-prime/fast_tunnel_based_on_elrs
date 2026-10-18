@@ -73,6 +73,7 @@ public:
     }
     bool negotiating() const { return phase_ != 0; }
     const EmlTddPlan_s &plan() const { return plan_; }
+    uint16_t peerQueued() const { return peerQueued_; }
     const EmlTddStats_s &stats() const { return stats_; }
     bool takeDirty() { const bool dirty = dirty_; dirty_ = false; return dirty; }
     void tick(uint32_t slot, size_t queued, uint8_t flow, uint8_t peerFlow, uint8_t payload, bool bandBusy)

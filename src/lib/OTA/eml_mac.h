@@ -44,6 +44,12 @@
 // P6: reserve the full 500 us turnaround bound for wider FHSS/band changes.
 // This is a capacity bound, separate from the nominal RX timestamp estimate.
 #define EML_TURNAROUND_US      500U
+// P9.1 software sequence targets 150..200 us by overlapping FSTX/FSRX lock
+// with FIFO/RF-switch work. Keep the proven 500 us capacity reserve until the
+// transition is measured on both ES900 boards in P10.
+#define EML_FAST_TURNAROUND_TARGET_US 200U
+static_assert(EML_TURNAROUND_US >= EML_FAST_TURNAROUND_TARGET_US,
+              "unmeasured fast turnaround must not reduce the slot reserve");
 
 // Session timing in milliseconds; converted to slots per profile.
 #define EML_HANDSHAKE_TIMEOUT_MS 700U

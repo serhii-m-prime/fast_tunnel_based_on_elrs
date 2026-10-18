@@ -281,6 +281,7 @@ public:
     uint8_t inFlight() const { return txCount_; }
     uint8_t peerFlowControl() const { return peerFlow_; }
     size_t queuedTx() const { return tx_.size(); }
+    size_t unissuedTx() const { return tx_.size() - issuedBytes_; }
     size_t queuedRx() const { return rx_.size(); }
     size_t uartSpace() const { return active() ? tx_.free() : 0; }
     const EmlTransportStats_s &stats() const { return stats_; }

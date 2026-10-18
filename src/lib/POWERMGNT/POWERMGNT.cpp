@@ -191,6 +191,18 @@ void POWERMGNT::setPower(PowerLevels_e Power)
     #endif
 
     const uint8_t powerIdx = Power - getMinPower();
+#if defined(EML_SX1276_20DBM) && defined(RADIO_SX127X)
+    // ES900RX uses the SX1276 PA_BOOST pin directly. Its layout table covers
+    // 10/25/50 mW; the extra bridge level is the datasheet +20 dBm sequence:
+    // PA_CONFIG=0x8f, PA_DAC=0x87 and OCP=150 mA.
+    Radio.Set20dBmMode(Power == PWR_100mW);
+    if (Power == PWR_100mW)
+    {
+        CurrentSX1280Power = 0x0f;
+        Radio.SetOutputPower(0x0f);
+    }
+    else
+#endif
     if (POWER_OUTPUT_DACWRITE)
     {
         if (POWER_OUTPUT_VALUES2 != nullptr)

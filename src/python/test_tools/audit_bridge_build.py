@@ -15,11 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from UnifiedConfiguration import findFirmwareEnd
 
 
-def audit(build, role, core):
+def audit(build, role, mcu, core):
     elf, binary = build / "firmware.elf", build / "firmware.bin"
     toolchain, prefix, start, end, capacity = (
         ("toolchain-xtensa-esp32", "xtensa-esp32-elf", "_iram_start", "_iram_end", 131072)
-        if role == "tx" else
+        if mcu == "esp32" else
         ("toolchain-xtensa", "xtensa-lx106-elf", "_text_start", "_text_end", 49152)
     )
     nm = core / "packages" / toolchain / "bin" / (prefix + "-nm")
@@ -37,7 +37,7 @@ def audit(build, role, core):
         if name in symbols:
             raise ValueError("Removed component remains in ELF: " + name)
     required = ("emlRxDone(", "emlTxDone()", "emlTimerTock()", "WIFI_device", "LittleFS")
-    if role == "tx":
+    if mcu == "esp32":
         required += ("Thermal_device",)
     for name in required:
         if name not in symbols:
@@ -66,7 +66,7 @@ def audit(build, role, core):
     used = address(end) - address(start)
     if not 0 < used < capacity:
         raise ValueError("IRAM budget exceeded")
-    if role == "rx":
+    if mcu == "esp8285":
         for line in symbols.splitlines():
             if any(name in line for name in ("emlRxDone(", "emlTxDone()", "emlTimerTock()")):
                 if not 0x40100000 <= int(line.split()[0], 16) < 0x4010C000:
@@ -84,10 +84,10 @@ def audit(build, role, core):
         raise ValueError("AirPort/recovery defaults changed")
     if options.get("airport-uart-baud" if role == "tx" else "rcvr-uart-baud") != 460800:
         raise ValueError("UART default changed")
-    if role == "tx" and options.get("unlock-higher-power") is not True:
+    if role == "tx" and mcu == "esp32" and options.get("unlock-higher-power") is not True:
         raise ValueError("TX higher-power option missing")
     return {
-        "role": role, "status": "PASS", "iram_used": used, "iram_free": capacity - used,
+        "role": role, "mcu": mcu, "status": "PASS", "iram_used": used, "iram_free": capacity - used,
         "options": options, "hardware": hardware, "archives": sorted(archives),
         "sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (elf, binary)},
         "hardware_tests_performed": False,
@@ -98,9 +98,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build", type=Path, help="environment build directory with .elf/.bin")
     parser.add_argument("--role", choices=("tx", "rx"), required=True)
+    parser.add_argument("--mcu", choices=("esp32", "esp8285"),
+                        help="MCU family; defaults to esp32 for tx and esp8285 for rx for backward compatibility")
     parser.add_argument("--core", type=Path, required=True, help="PlatformIO Core directory")
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
-    report = audit(args.build, args.role, args.core)
+    mcu = args.mcu or ("esp32" if args.role == "tx" else "esp8285")
+    report = audit(args.build, args.role, mcu, args.core)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     print("PASS:", args.role, "IRAM", report["iram_used"], "free", report["iram_free"])

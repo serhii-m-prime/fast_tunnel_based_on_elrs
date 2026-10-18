@@ -11,7 +11,9 @@ static Button button2;
 // only check every second if the device is in-use, i.e. RX connected, or TX is armed
 static constexpr int MS_IN_USE = 1000;
 
-#if defined(TARGET_RX)
+// EML bridge: every role uses this fixed table, so Wi-Fi recovery is reachable on
+// an RX board running as Master as well (no TX Lua button configuration exists).
+#if defined(TARGET_RX) || defined(EML_BRIDGE)
 static constexpr struct {
     bool pressType;
     uint8_t count;
@@ -33,7 +35,7 @@ void registerButtonFunction(action_e action, ButtonAction_fn function)
 
 size_t button_GetActionCnt()
 {
-#if defined(TARGET_RX)
+#if defined(TARGET_RX) || defined(EML_BRIDGE)
     return ARRAY_SIZE(button_actions);
 #else
     return CONFIG_TX_BUTTON_ACTION_CNT;
@@ -43,7 +45,7 @@ size_t button_GetActionCnt()
 static void handlePress(uint8_t button, bool longPress, uint8_t count)
 {
     DBGLN("handlePress(%u, %u, %u)", button, (uint8_t)longPress, count);
-#if defined(TARGET_TX)
+#if defined(TARGET_TX) && !defined(EML_BRIDGE)
     const button_action_t *button_actions = config.GetButtonActions(button)->val.actions;
 #endif
     for (unsigned i=0 ; i<button_GetActionCnt() ; i++)
@@ -88,7 +90,8 @@ static int event()
     {
         return DURATION_NEVER;
     }
-#elif defined(TARGET_RX)
+#elif defined(TARGET_RX) && !defined(EML_BRIDGE)
+    // A deliberate 5 s hold may stop a bridge link to reach Wi-Fi diagnostics
     if (connectionState == connected)
     {
         return DURATION_NEVER;

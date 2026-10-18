@@ -95,6 +95,10 @@ SX127xDriver::SX127xDriver(): SX12xxDriverCommon()
   headerExplMode = false;
   crcEnabled = false;
   lowFrequencyMode = SX1278_HIGH_FREQ;
+  pwrCurrent = 0;
+  pwrPending = PWRPENDING_NONE;
+  pwr20Current = false;
+  pwr20Pending = -1;
   strongestReceivingRadio = SX12XX_Radio_1;
 #if defined(SX127X_FSK_SUPPORT)
   fskRxConfig = 0;
@@ -367,14 +371,42 @@ void SX127xDriver::SetOutputPower(uint8_t Power)
   }
 }
 
+void SX127xDriver::Set20dBmMode(bool enabled)
+{
+  if (pwr20Current != enabled || pwr20Pending >= 0)
+    pwr20Pending = enabled ? 1 : 0;
+}
+
+bool SX127xDriver::ApplyOutputPowerAtIdle()
+{
+  if (currOpmode != SX127x_OPMODE_STANDBY)
+    return false;
+  CommitOutputPower();
+  return true;
+}
+
 void ICACHE_RAM_ATTR SX127xDriver::CommitOutputPower()
 {
-  if (pwrPending == PWRPENDING_NONE)
+  if (pwrPending == PWRPENDING_NONE && pwr20Pending < 0)
     return;
 
-  pwrCurrent = pwrPending & 0xFF;
-  pwrPending = PWRPENDING_NONE;
-  hal.writeRegister(SX127X_REG_PA_CONFIG, pwrCurrent, SX12XX_Radio_All);
+  if (pwrPending != PWRPENDING_NONE)
+  {
+    pwrCurrent = pwrPending & 0xFF;
+    pwrPending = PWRPENDING_NONE;
+    hal.writeRegister(SX127X_REG_PA_CONFIG, pwrCurrent, SX12XX_Radio_All);
+  }
+  if (pwr20Pending >= 0)
+  {
+    pwr20Current = pwr20Pending != 0;
+    pwr20Pending = -1;
+    // Preserve the SX1276 RegPaDac reserved/default high bit (0x80): the
+    // documented full register values are 0x87 (+20 dBm) and 0x84 (normal).
+    hal.writeRegister(SX1278_REG_PA_DAC, pwr20Current ? SX127X_PA_DAC_20DBM : SX127X_PA_DAC_DEFAULT,
+                      SX12XX_Radio_All);
+    hal.writeRegisterBits(SX127X_REG_OCP, SX127X_OCP_ON | SX127X_OCP_150MA,
+                          SX127X_OCP_MASK, SX12XX_Radio_All);
+  }
 }
 
 void SX127xDriver::SetPreambleLength(uint8_t PreambleLen)
@@ -423,6 +455,21 @@ void ICACHE_RAM_ATTR SX127xDriver::SetFrequencyReg(uint32_t regfreq, SX12XX_Radi
     RXnb();
   }
 }
+
+#if defined(EML_BRIDGE)
+void ICACHE_RAM_ATTR SX127xDriver::PrepareFrequencyFast(uint32_t regfreq, bool tx, SX12XX_Radio_Number_t radioNumber)
+{
+  currFreq = regfreq;
+  SetMode(SX127x_OPMODE_STANDBY, radioNumber);
+  WORD_ALIGNED_ATTR uint8_t outbuff[3] = {
+    (uint8_t)((regfreq >> 16) & 0xFF),
+    (uint8_t)((regfreq >> 8) & 0xFF),
+    (uint8_t)(regfreq & 0xFF)
+  };
+  hal.writeRegister(SX127X_REG_FRF_MSB, outbuff, sizeof(outbuff), radioNumber);
+  SetMode(tx ? SX127x_OPMODE_FSTX : SX127x_OPMODE_FSRX, radioNumber);
+}
+#endif
 
 bool SX127xDriver::DetectChip(SX12XX_Radio_Number_t radioNumber)
 {
@@ -479,7 +526,10 @@ void ICACHE_RAM_ATTR SX127xDriver::TXnb(uint8_t * data, bool sendGeminiBuffer, u
 
   transmittingRadio = radioNumber;
 
-  SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All);
+  // The EML fast path already has the TX synthesizer locking while this
+  // routine fills the FIFO. Other callers retain the conservative Standby.
+  if (currOpmode != SX127x_OPMODE_FSTX)
+    SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All);
 
   if (radioNumber == SX12XX_Radio_NONE)
   {
@@ -489,11 +539,12 @@ void ICACHE_RAM_ATTR SX127xDriver::TXnb(uint8_t * data, bool sendGeminiBuffer, u
 #if defined(SX127X_FSK_SUPPORT)
   if (ModFSKorLoRa == SX127x_OPMODE_FSK_OOK)
   {
-    // FSK has no FIFO pointers (0x0D is RegRxConfig): clear the FIFO, fill it in Standby and
-    // start TX; TxStartCondition=FifoNotEmpty begins after the PA ramp. Gemini is not used.
+    // FSK has no FIFO pointers (0x0D is RegRxConfig): clear and fill the FIFO
+    // in Standby or FSTX, then start TX. Gemini is not used.
     hal.writeRegister(SX127X_FSK_REG_IRQ_FLAGS2, SX127X_FSK_IRQ2_FIFO_OVERRUN, radioNumber);
     RFAMP.TXenable(radioNumber);
     hal.writeRegister(SX127X_REG_FIFO, data, PayloadLength, radioNumber);
+    FskWaitPllLock(radioNumber == SX12XX_Radio_All ? SX12XX_Radio_1 : radioNumber);
     SetMode(SX127x_OPMODE_TX, radioNumber);
     return;
   }
@@ -535,8 +586,32 @@ bool ICACHE_RAM_ATTR SX127xDriver::RXnbISR(SX12XX_Radio_Number_t radioNumber)
   return RXdoneCallback(SX12XX_RX_OK);
 }
 
+#if defined(SX127X_FSK_SUPPORT)
+// From FSTX/FSRX the FSK TX/RX states assume a locked synthesizer. After a hop of up
+// to ~60 MHz, wait (bounded, ~64 SPI reads) so the carrier does not settle inside the
+// packet. LoRa tolerates the residual offset; GFSK showed isolated bit errors.
+void ICACHE_RAM_ATTR SX127xDriver::FskWaitPllLock(SX12XX_Radio_Number_t radioNumber)
+{
+  if (ModFSKorLoRa != SX127x_OPMODE_FSK_OOK ||
+      (currOpmode != SX127x_OPMODE_FSTX && currOpmode != SX127x_OPMODE_FSRX))
+    return;
+  for (uint8_t i = 0; i < 64; ++i)
+  {
+    if (hal.readRegister(SX127X_FSK_REG_IRQ_FLAGS1, radioNumber) & SX127X_FSK_IRQ1_PLL_LOCK)
+    {
+      if (i) ++FskPllWaits;
+      return;
+    }
+  }
+  ++FskPllTimeouts;
+}
+#endif
+
 void ICACHE_RAM_ATTR SX127xDriver::RXnb()
 {
+#if defined(SX127X_FSK_SUPPORT)
+  FskWaitPllLock(SX12XX_Radio_1);
+#endif
   RFAMP.RXenable();
   SetMode(SX127x_OPMODE_RXCONTINUOUS, SX12XX_Radio_All);
 }
@@ -651,7 +726,10 @@ void ICACHE_RAM_ATTR SX127xDriver::SetMode(SX127x_RadioOPmodes mode, SX12XX_Radi
   //    return;
   // }
 
-  hal.writeRegister(SX127X_REG_OP_MODE, mode | lowFrequencyMode, radioNumber);
+  // LongRangeMode is part of RegOpMode and must be retained on every state
+  // transition. Omitting it silently moves a configured LoRa modem back onto
+  // the FSK register page.
+  hal.writeRegister(SX127X_REG_OP_MODE, ModFSKorLoRa | mode | lowFrequencyMode, radioNumber);
   currOpmode = mode;
 }
 
