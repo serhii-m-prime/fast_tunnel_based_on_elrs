@@ -3,6 +3,7 @@
 #include "SX127xRegs.h"
 #include "SX127xHal.h"
 #include "SX12xxDriverCommon.h"
+#include "SX127xFsk.h"
 
 #ifdef PLATFORM_ESP8266
 #include <cstdint>
@@ -29,6 +30,13 @@ public:
     bool DetectChip(SX12XX_Radio_Number_t radioNumber);
     void Config(uint8_t bw, uint8_t sf, uint8_t cr, uint32_t freq, uint8_t preambleLen, uint8_t syncWord, bool InvertIQ, uint8_t _PayloadLength);
     void Config(uint8_t bw, uint8_t sf, uint8_t cr, uint32_t freq, uint8_t preambleLen, bool InvertIQ, uint8_t _PayloadLength);
+#if defined(SX127X_FSK_SUPPORT)
+    // P5: FSK/GFSK packet mode (fixed length <= 64-byte FIFO, DIO0 = PayloadReady/PacketSent).
+    // Switches the modem through Sleep; Config() switches back to LoRa.
+    bool ConfigFsk(const SX127xFskParams_s &params, uint32_t freq, uint8_t payloadLength);
+    bool IsFsk() const { return ModFSKorLoRa == SX127x_OPMODE_FSK_OOK; }
+    volatile uint32_t FskFifoOverruns = 0;
+#endif
     void SetMode(SX127x_RadioOPmodes mode, SX12XX_Radio_Number_t radioNumber);
     void SetTxIdleMode() { SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All); } // set Idle mode used when switching from RX to TX
     void ConfigLoraDefaults();
@@ -90,6 +98,12 @@ private:
     uint8_t pwrCurrent;
     int16_t pwrPending;
     uint8_t lowFrequencyMode;
+#if defined(SX127X_FSK_SUPPORT)
+    uint8_t fskRxConfig;
+    int8_t fskLastRssi;
+    void InvalidateLoraCache();
+    void FskIsrCallback(SX12XX_Radio_Number_t radioNumber);
+#endif
 
     static void IsrCallback_1();
     static void IsrCallback_2();

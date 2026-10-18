@@ -305,3 +305,74 @@ typedef enum
 
 #define SPI_READ 0b00000000
 #define SPI_WRITE 0b10000000
+
+// ---- FSK/OOK register page (SX1276/77/78/79 datasheet §6.2, Table 41) ----------------
+// Addresses 0x0D..0x3F have a different meaning than in LoRa mode: LoRa-only helpers
+// (FIFO pointers, IRQ flags at 0x12, PPM/FEI, sync word 0x39) must not run in FSK mode.
+#define SX127X_FSK_REG_BITRATE_MSB      0x02
+#define SX127X_FSK_REG_BITRATE_LSB      0x03
+#define SX127X_FSK_REG_FDEV_MSB         0x04
+#define SX127X_FSK_REG_FDEV_LSB         0x05
+#define SX127X_FSK_REG_PA_RAMP          0x0A
+#define SX127X_FSK_REG_RX_CONFIG        0x0D
+#define SX127X_FSK_REG_RSSI_CONFIG      0x0E
+#define SX127X_FSK_REG_RSSI_VALUE       0x11
+#define SX127X_FSK_REG_RX_BW            0x12
+#define SX127X_FSK_REG_AFC_BW           0x13
+#define SX127X_FSK_REG_AFC_FEI          0x1A
+#define SX127X_FSK_REG_PREAMBLE_DETECT  0x1F
+#define SX127X_FSK_REG_PREAMBLE_MSB     0x25
+#define SX127X_FSK_REG_PREAMBLE_LSB     0x26
+#define SX127X_FSK_REG_SYNC_CONFIG      0x27
+#define SX127X_FSK_REG_SYNC_VALUE1      0x28
+#define SX127X_FSK_REG_PACKET_CONFIG1   0x30
+#define SX127X_FSK_REG_PACKET_CONFIG2   0x31
+#define SX127X_FSK_REG_PAYLOAD_LENGTH   0x32
+#define SX127X_FSK_REG_FIFO_THRESH      0x35
+#define SX127X_FSK_REG_SEQ_CONFIG1      0x36
+#define SX127X_FSK_REG_IMAGE_CAL        0x3B
+#define SX127X_FSK_REG_IRQ_FLAGS1       0x3E
+#define SX127X_FSK_REG_IRQ_FLAGS2       0x3F
+#define SX127X_FSK_REG_DIO_MAPPING1     0x40
+#define SX127X_FSK_REG_BITRATE_FRAC     0x5D
+
+#define SX127X_FSK_FIFO_SIZE            64U
+
+// RegPaRamp: ModulationShaping (FSK) | PaRamp
+#define SX127X_FSK_SHAPING_NONE         0x00
+#define SX127X_FSK_SHAPING_BT_1_0       0x20
+#define SX127X_FSK_SHAPING_BT_0_5       0x40
+#define SX127X_FSK_SHAPING_BT_0_3       0x60
+#define SX127X_FSK_PA_RAMP_40_US        0x09
+// RegRxConfig
+#define SX127X_FSK_RESTART_RX_NO_PLL    0x40
+#define SX127X_FSK_AFC_AUTO_ON          0x10
+#define SX127X_FSK_AGC_AUTO_ON          0x08
+#define SX127X_FSK_RX_TRIGGER_PREAMBLE  0x06
+// RegRssiConfig: RssiSmoothing 32 samples
+#define SX127X_FSK_RSSI_SMOOTHING_32    0x04
+// RegRxBw / RegAfcBw DC-cancellation cutoff fields
+#define SX127X_FSK_RXBW_DCC_4_PERCENT   0x40
+#define SX127X_FSK_AFCBW_DCC_DEFAULT    0x80
+// RegAfcFei
+#define SX127X_FSK_AFC_AUTO_CLEAR_ON    0x01
+// RegPreambleDetect: on, 2 bytes, 10 chip errors tolerated
+#define SX127X_FSK_PREAMBLE_DETECT_2B   0xAA
+// RegSyncConfig: AutoRestartRx without PLL relock, preamble 0xAA, sync on, size = bytes - 1
+#define SX127X_FSK_AUTO_RESTART_RX      0x40
+#define SX127X_FSK_SYNC_ON              0x10
+// RegPacketConfig1/2
+#define SX127X_FSK_PACKET_FIXED         0x00
+#define SX127X_FSK_DCFREE_WHITENING     0x40
+#define SX127X_FSK_DATA_MODE_PACKET     0x40
+// RegFifoThresh: start TX as soon as the FIFO is not empty
+#define SX127X_FSK_TX_START_FIFO_NOT_EMPTY 0x80
+// RegImageCal
+#define SX127X_FSK_IMAGECAL_START       0x40
+#define SX127X_FSK_IMAGECAL_RUNNING     0x20
+// RegIrqFlags2
+#define SX127X_FSK_IRQ2_FIFO_OVERRUN    0x10
+#define SX127X_FSK_IRQ2_PACKET_SENT     0x08
+#define SX127X_FSK_IRQ2_PAYLOAD_READY   0x04
+// RegDioMapping1: DIO0 = PayloadReady (RX) / PacketSent (TX)
+#define SX127X_FSK_DIO0_PAYLOAD_PACKET  0x00

@@ -39,4 +39,15 @@ struct EmlMacStats_s
 };
 const EmlMacStats_s &emlBridgeMacStats();
 
+// P5.5: PHY-independent link metrics over the last 100 slot pairs (FSK has no SNR)
+struct EmlLinkStats_s
+{
+    uint8_t phy_profile;  // EmlPhyProfile_e in use
+    uint8_t lq;           // % of expected peer frames received intact
+    uint8_t per;          // 100 - lq
+    int8_t rssi;          // dBm, averaged
+    uint32_t fsk_fifo_overruns;
+};
+EmlLinkStats_s emlBridgeLinkStats();
+
 #endif

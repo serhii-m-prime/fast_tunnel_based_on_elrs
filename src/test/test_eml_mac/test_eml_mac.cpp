@@ -38,24 +38,249 @@ void test_toa_every_length_monotonic_and_bounded()
 
 void test_slot_budget()
 {
-    const EmlMacProfile_s profiles[] = {EML_PROFILE_LORA64, EML_PROFILE_LORA32};
+    const EmlMacProfile_s profiles[] = {EML_PROFILE_LORA64, EML_PROFILE_LORA32, EML_PROFILE_FSK64, EML_PROFILE_FSK32, EML_PROFILE_FSK64_300K};
     for (const EmlMacProfile_s &p : profiles)
     {
         TEST_ASSERT_TRUE(emlProfileValid(p));
         const uint32_t toa = emlProfileToaUs(p);
-        TEST_ASSERT_EQUAL_UINT32(EML_TX_START_US + toa + EML_RX_DONE_US, emlRxOffsetUs(p));
+        TEST_ASSERT_EQUAL_UINT32(p.tx_start_us + toa + p.rx_done_us, emlRxOffsetUs(p));
         TEST_ASSERT_TRUE(p.slot_us >= emlMinSlotUs(p));
         // The peer frame ends (with responder bias and guard) before the next own boundary
-        TEST_ASSERT_TRUE(EML_TX_START_US + toa + EML_RX_DONE_US + EML_RESPONDER_BIAS_US + EML_PREP_MARGIN_US < p.slot_us);
-        // A responder this much late still opens RX inside the coordinator's preamble
-        TEST_ASSERT_TRUE(EML_GUARD_US / 2U < EML_TX_START_US + (uint32_t)p.preamble * 128U / 2U);
+        TEST_ASSERT_TRUE(p.tx_start_us + toa + p.rx_done_us + EML_RESPONDER_BIAS_US + EML_PREP_MARGIN_US < p.slot_us);
+        // A responder late by half the guard still opens RX inside the coordinator's preamble
+        TEST_ASSERT_TRUE(EML_GUARD_US / 2U < emlRxLateToleranceUs(p));
         EmlMacProfile_s tight = p;
         tight.slot_us = emlMinSlotUs(p) - 1U;
         TEST_ASSERT_FALSE(emlProfileValid(tight));
     }
+    TEST_ASSERT_EQUAL_UINT32(250U + 5U * 128U, emlRxLateToleranceUs(EML_PROFILE_LORA64));
+    TEST_ASSERT_EQUAL_UINT32(200U + 6U * 32U, emlRxLateToleranceUs(EML_PROFILE_FSK64));
     // Net payload per direction: one frame per slot pair
     TEST_ASSERT_EQUAL_UINT32(1714, (uint32_t)(60ULL * 1000000ULL / (2ULL * EML_PROFILE_LORA64.slot_us)));
     TEST_ASSERT_EQUAL_UINT32(1346, (uint32_t)(28ULL * 1000000ULL / (2ULL * EML_PROFILE_LORA32.slot_us)));
+    TEST_ASSERT_EQUAL_UINT32(7894, (uint32_t)(60ULL * 1000000ULL / (2ULL * EML_PROFILE_FSK64.slot_us)));
+    TEST_ASSERT_EQUAL_UINT32(5000, (uint32_t)(28ULL * 1000000ULL / (2ULL * EML_PROFILE_FSK32.slot_us)));
+}
+
+// ---- P5.2/P5.4/P5.7: FSK profiles ------------------------------------------------------
+
+void test_fsk_toa_and_fifo_fit()
+{
+    TEST_ASSERT_EQUAL_UINT32(2496, emlProfileToaUs(EML_PROFILE_FSK64)); // (10 + 4 + 64) B * 32 us
+    TEST_ASSERT_EQUAL_UINT32(1472, emlProfileToaUs(EML_PROFILE_FSK32));
+    TEST_ASSERT_EQUAL_UINT32(2080, emlProfileToaUs(EML_PROFILE_FSK64_300K));
+    TEST_ASSERT_EQUAL_UINT32(2560, emlFskToaUs(250000, 10, 4, 64, 2)); // a hardware CRC would cost 64 us
+    for (uint16_t n = 1; n <= 64; n++)
+        TEST_ASSERT_EQUAL_UINT32((10U + 4U + n) * 32U, emlFskToaUs(250000, 10, 4, n, 0));
+    // Fixed length without length/address/CRC bytes: N alone fills the 64-byte FIFO
+    TEST_ASSERT_TRUE(EML_PROFILE_FSK64.frame_size <= EML_FSK_FIFO_BYTES);
+    EmlMacProfile_s big = EML_PROFILE_FSK64;
+    big.frame_size = 65;
+    TEST_ASSERT_FALSE(emlFskWithinDatasheet(big));
+}
+
+void test_fsk_profile_limits()
+{
+    TEST_ASSERT_TRUE(emlFskWithinDatasheet(EML_PROFILE_FSK64));
+    // h = 2*Fdev/BR and the occupied single sideband Fdev + BR/2 of the chosen profile
+    TEST_ASSERT_EQUAL_UINT32(215000, EML_PROFILE_FSK64.fdev_hz + EML_PROFILE_FSK64.bitrate / 2U);
+    TEST_ASSERT_TRUE(4U * EML_PROFILE_FSK64.fdev_hz >= EML_PROFILE_FSK64.bitrate);
+
+    EmlMacProfile_s p = EML_PROFILE_FSK64;
+    p.fdev_hz = 125000;                 // AGENTS range low end: exactly at the filter edge, no offset margin
+    TEST_ASSERT_TRUE(emlFskWithinDatasheet(p));
+    p.fdev_hz = 150000;                 // Fdev + BR/2 = 275 kHz > 250 kHz
+    TEST_ASSERT_FALSE(emlFskWithinDatasheet(p));
+    p.fdev_hz = 50000;                  // h = 0.4 < 0.5
+    TEST_ASSERT_FALSE(emlFskWithinDatasheet(p));
+    p = EML_PROFILE_FSK64; p.rxbw_hz = 200000; // filter narrower than the signal
+    TEST_ASSERT_FALSE(emlFskWithinDatasheet(p));
+    p = EML_PROFILE_FSK64; p.preamble = 3;
+    TEST_ASSERT_FALSE(emlFskWithinDatasheet(p));
+
+    // P5.7: 300 kbit/s is inside the datasheet but only as an explicit experiment
+    p = EML_PROFILE_FSK64_300K;
+    TEST_ASSERT_TRUE(emlFskWithinDatasheet(p));
+    TEST_ASSERT_TRUE(emlProfileValid(p));
+    p.experimental = false;
+    TEST_ASSERT_FALSE(emlProfileValid(p));
+    // 500 / 1000 kbit/s: above the 300 kbit/s FSK limit, and h >= 0.5 needs Fdev + BR/2 of
+    // 375 / 750 kHz, beyond the 250 kHz maximum RX filter
+    const uint32_t rates[] = {500000, 1000000};
+    for (uint32_t br : rates)
+    {
+        p = EML_PROFILE_FSK64_300K;
+        p.bitrate = br;
+        p.fdev_hz = br / 4U;
+        TEST_ASSERT_FALSE(emlFskWithinDatasheet(p));
+        TEST_ASSERT_FALSE(emlProfileValid(p));
+        TEST_ASSERT_TRUE(p.fdev_hz + br / 2U > 250000U);
+    }
+}
+
+void test_fsk_sync_word_and_configuration_ids()
+{
+    const uint8_t uid[6] = {1, 2, 3, 4, 5, 6};
+    uint8_t a[4], b[4];
+    emlFskSyncWord(uid, a);
+    emlFskSyncWord(uid, b);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(a, b, 4);
+    for (uint8_t i = 0; i < 4; i++) TEST_ASSERT_NOT_EQUAL(0, a[i]);
+    uint8_t other[6] = {1, 2, 3, 4, 5, 7};
+    emlFskSyncWord(other, b);
+    TEST_ASSERT_TRUE(memcmp(a, b, 4) != 0);
+    // zero bytes are replaced
+    for (uint32_t seed = 0; seed < 2000; seed++)
+    {
+        uint8_t u[6] = {(uint8_t)seed, (uint8_t)(seed >> 8), 0, 0, 0, 0};
+        emlFskSyncWord(u, b);
+        for (uint8_t i = 0; i < 4; i++) TEST_ASSERT_NOT_EQUAL(0, b[i]);
+    }
+
+    const EmlFhssRecord_s fhss = {903500000, 926900000, 40, 0x1234, 240};
+    const uint32_t lora = emlDeriveLinkIds(uid, EML_PROFILE_LORA64, fhss).configuration;
+    const uint32_t fsk = emlDeriveLinkIds(uid, EML_PROFILE_FSK64, fhss).configuration;
+    const uint32_t fsk300 = emlDeriveLinkIds(uid, EML_PROFILE_FSK64_300K, fhss).configuration;
+    TEST_ASSERT_NOT_EQUAL(lora, fsk);
+    TEST_ASSERT_NOT_EQUAL(fsk, fsk300);
+    EmlMacProfile_s p = EML_PROFILE_FSK64; p.fdev_hz += 1000;
+    TEST_ASSERT_NOT_EQUAL(fsk, emlDeriveLinkIds(uid, p, fhss).configuration);
+    const EmlTransportConfig_s c = emlMacTransportConfig(EML_COORDINATOR, emlDeriveLinkIds(uid, EML_PROFILE_FSK64, fhss), EML_PROFILE_FSK64, 240);
+    TEST_ASSERT_TRUE(EmlTransport<1024>::validConfig(c));
+    TEST_ASSERT_EQUAL_UINT8(EML_PHY_FSK_250, c.phy_profile);
+    TEST_ASSERT_EQUAL_UINT16(395, c.link_timeout_slots);
+}
+
+// ---- P5.5: PHY selection and link quality -------------------------------------------------
+
+void test_phy_plan_dwell()
+{
+    const EmlMacProfile_s order[] = {EML_PROFILE_FSK64, EML_PROFILE_LORA64};
+    const EmlPhyPlan_s plan = emlPhyPlan(order, 2, 40);
+    TEST_ASSERT_EQUAL_UINT32(304000, emlRendezvousPeriodUs(EML_PROFILE_FSK64, 40));
+    TEST_ASSERT_EQUAL_UINT32(1400000, emlRendezvousPeriodUs(EML_PROFILE_LORA64, 40));
+    TEST_ASSERT_EQUAL_UINT32(639, plan.coordinator_dwell_ms[0]);   // 2 x 304 ms + 8 slots
+    TEST_ASSERT_EQUAL_UINT32(2940, plan.coordinator_dwell_ms[1]);
+    TEST_ASSERT_EQUAL_UINT32(639 + 2940 + 639, plan.responder_dwell_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(639 + 2940 + 2940, plan.responder_dwell_ms[1]);
+    const EmlPhyPlan_s single = emlPhyPlan(order, 1, 40);
+    EmlPhySelector s;
+    s.begin(single, EML_COORDINATOR, 0);
+    TEST_ASSERT_FALSE(s.update(100000, false, true, false));
+    TEST_ASSERT_EQUAL_UINT8(0, s.index());
+}
+
+void test_phy_selector_rules()
+{
+    const EmlMacProfile_s order[] = {EML_PROFILE_FSK64, EML_PROFILE_LORA64};
+    const EmlPhyPlan_s plan = emlPhyPlan(order, 2, 40);
+    EmlPhySelector c;
+    c.begin(plan, EML_COORDINATOR, 1000);
+    TEST_ASSERT_FALSE(c.update(1000 + 638, false, true, false));
+    TEST_ASSERT_FALSE(c.update(1000 + 700, false, false, false)); // handshake in progress: stay
+    TEST_ASSERT_TRUE(c.update(1000 + 701, false, true, false));
+    TEST_ASSERT_EQUAL_UINT8(1, c.index());
+    TEST_ASSERT_EQUAL_UINT8(EML_PHY_LORA_500_SF6_CR45, c.profile().phy_profile);
+    // A session holds the PHY indefinitely, its loss returns to the preferred PHY
+    TEST_ASSERT_FALSE(c.update(100000, true, false, false));
+    TEST_ASSERT_FALSE(c.update(200000, true, false, false));
+    TEST_ASSERT_TRUE(c.update(200001, false, true, true));
+    TEST_ASSERT_EQUAL_UINT8(0, c.index());
+    TEST_ASSERT_FALSE(c.update(200002, false, true, true)); // already preferred
+    // millis() wrap
+    c.begin(plan, EML_COORDINATOR, 0xFFFFFF00UL);
+    TEST_ASSERT_FALSE(c.update(0x00000100UL, false, true, false));
+    TEST_ASSERT_TRUE(c.update(0xFFFFFF00UL + 639U, false, true, false));
+}
+
+// Abstract timeline: each side cycles with its own phase; the pair locks at the first
+// rendezvous instant of a working PHY while both are on it. The plan must guarantee a
+// meeting within one responder cycle plus one coordinator cycle.
+static uint32_t meetTime(const EmlPhyPlan_s &plan, const EmlMacProfile_s *order, bool fskWorks,
+                         uint32_t coordinatorStart, uint32_t responderStart, uint32_t rendezvousPhase, uint8_t *phy)
+{
+    EmlPhySelector c, r;
+    c.begin(plan, EML_COORDINATOR, coordinatorStart);
+    r.begin(plan, EML_RESPONDER, responderStart);
+    uint32_t coordinatorEntered = coordinatorStart;
+    const uint32_t start = coordinatorStart > responderStart ? coordinatorStart : responderStart;
+    for (uint32_t t = start; t < start + 60000U; t++)
+    {
+        if (c.update(t, false, true, false)) coordinatorEntered = t;
+        r.update(t, false, true, false);
+        const uint8_t i = c.index();
+        const bool works = order[i].phy_profile != EML_PHY_FSK_250 || fskWorks;
+        const uint32_t period = emlRendezvousPeriodUs(order[i], 40) / 1000U;
+        if (works && i == r.index() && t > responderStart && (t - coordinatorEntered + rendezvousPhase) % period == 0)
+        {
+            *phy = order[i].phy_profile;
+            return t - start;
+        }
+    }
+    return 0xFFFFFFFFUL;
+}
+
+void test_phy_selector_meets_on_first_working_phy()
+{
+    const EmlMacProfile_s order[] = {EML_PROFILE_FSK64, EML_PROFILE_LORA64};
+    const EmlPhyPlan_s plan = emlPhyPlan(order, 2, 40);
+    const uint32_t bound = plan.responder_dwell_ms[0] + plan.responder_dwell_ms[1];
+    uint32_t worstFsk = 0, worstLora = 0;
+    for (uint32_t offset = 0; offset < 12000; offset += 137)
+    {
+        for (uint32_t phase = 0; phase < 1400; phase += 211)
+        {
+            uint8_t phy = 0;
+            uint32_t t = meetTime(plan, order, true, 5000 + offset, 5000, phase % 304, &phy);
+            TEST_ASSERT_TRUE(t <= bound);
+            if (phy == EML_PHY_FSK_250 && t > worstFsk) worstFsk = t;
+            t = meetTime(plan, order, false, 5000, 5000 + offset, phase, &phy);
+            TEST_ASSERT_TRUE(t <= bound);
+            TEST_ASSERT_EQUAL_UINT8(EML_PHY_LORA_500_SF6_CR45, phy);
+            if (t > worstLora) worstLora = t;
+        }
+    }
+    // Both start together (power-on of a pair): FSK is found within its first dwell
+    uint8_t phy = 0;
+    TEST_ASSERT_TRUE(meetTime(plan, order, true, 0, 0, 100, &phy) <= plan.coordinator_dwell_ms[0]);
+    TEST_ASSERT_EQUAL_UINT8(EML_PHY_FSK_250, phy);
+    TEST_ASSERT_TRUE(worstLora <= bound);
+    TEST_ASSERT_TRUE(worstFsk > 0);
+}
+
+void test_link_quality_window()
+{
+    EmlLinkQuality q;
+    q.reset(10);
+    TEST_ASSERT_EQUAL_UINT8(0, q.lq());
+    for (uint32_t pair = 10; pair < 210; pair++)
+    {
+        if (pair % 4 != 0)
+        {
+            q.received(pair);                 // 75 %
+            q.received(pair);                 // duplicate marks are harmless
+        }
+        q.finalizeBefore(pair);               // pair itself still open
+    }
+    q.finalizeBefore(210);
+    TEST_ASSERT_EQUAL_UINT8(100, q.samples());
+    TEST_ASSERT_EQUAL_UINT8(75, q.lq());
+    q.received(5);                            // far late: ignored
+    q.finalizeBefore(209);                    // slightly behind: no-op
+    TEST_ASSERT_EQUAL_UINT8(75, q.lq());
+    // 50 lost pairs push the window to 25 % of the last 100... (50 x 75% + 50 x 0) / 100
+    q.finalizeBefore(260);
+    TEST_ASSERT_EQUAL_UINT8(37, q.lq());
+    // a long gap clears everything to 0 %
+    q.finalizeBefore(1000);
+    TEST_ASSERT_EQUAL_UINT8(0, q.lq());
+    for (uint32_t pair = 1000; pair < 1100; pair++) { q.received(pair); q.finalizeBefore(pair + 1); }
+    TEST_ASSERT_EQUAL_UINT8(100, q.lq());
+    // counter wrap resets instead of stalling
+    q.finalizeBefore(3);
+    q.received(3); q.finalizeBefore(4);
+    TEST_ASSERT_EQUAL_UINT8(100, q.lq());
+    TEST_ASSERT_EQUAL_UINT8(1, q.samples());
 }
 
 // ---- P4.4/P4.5: slot clock, hop advance and transport time -----------------------------
@@ -417,7 +642,7 @@ void test_mac_rendezvous_lock_and_handshake()
 
 void test_mac_bidirectional_stream_with_losses()
 {
-    const EmlMacProfile_s profiles[] = {EML_PROFILE_LORA64, EML_PROFILE_LORA32};
+    const EmlMacProfile_s profiles[] = {EML_PROFILE_LORA64, EML_PROFILE_LORA32, EML_PROFILE_FSK64, EML_PROFILE_FSK32};
     for (const EmlMacProfile_s &p : profiles)
     {
         simSeed = 11;
@@ -517,6 +742,13 @@ int main(int, char **)
     RUN_TEST(test_toa_matches_semtech_and_elrs_tables);
     RUN_TEST(test_toa_every_length_monotonic_and_bounded);
     RUN_TEST(test_slot_budget);
+    RUN_TEST(test_fsk_toa_and_fifo_fit);
+    RUN_TEST(test_fsk_profile_limits);
+    RUN_TEST(test_fsk_sync_word_and_configuration_ids);
+    RUN_TEST(test_phy_plan_dwell);
+    RUN_TEST(test_phy_selector_rules);
+    RUN_TEST(test_phy_selector_meets_on_first_working_phy);
+    RUN_TEST(test_link_quality_window);
     RUN_TEST(test_clock_symmetric_tdd_and_hops);
     RUN_TEST(test_next_own_slot_is_monotonic);
     RUN_TEST(test_transport_config_from_profile);

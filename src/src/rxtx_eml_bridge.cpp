@@ -23,16 +23,48 @@ static constexpr EmlRole_e kRole = EML_RESPONDER;
 #error "EML_BRIDGE needs TARGET_TX or TARGET_RX"
 #endif
 
-// Both modules of a pair must be built with the same frame size (part of configuration_id)
+// Both modules of a pair must be built with the same frame size and PHY mode; both are
+// part of configuration_id, so a mismatched pair never completes the handshake.
 #if !defined(EML_FRAME_SIZE) || EML_FRAME_SIZE == 64
-static constexpr EmlMacProfile_s kProfile = EML_PROFILE_LORA64;
+static constexpr uint8_t kFrameSize = EML_FRAME_SIZE_64;
+static constexpr EmlMacProfile_s kLoraProfile = EML_PROFILE_LORA64;
+#if defined(EML_FSK_EXPERIMENTAL_300K)
+static constexpr EmlMacProfile_s kFskProfile = EML_PROFILE_FSK64_300K; // P5.7 experiment, unverified
+#else
+static constexpr EmlMacProfile_s kFskProfile = EML_PROFILE_FSK64;
+#endif
 #elif EML_FRAME_SIZE == 32
-static constexpr EmlMacProfile_s kProfile = EML_PROFILE_LORA32;
+static constexpr uint8_t kFrameSize = EML_FRAME_SIZE_32;
+static constexpr EmlMacProfile_s kLoraProfile = EML_PROFILE_LORA32;
+static constexpr EmlMacProfile_s kFskProfile = EML_PROFILE_FSK32;
+#if defined(EML_FSK_EXPERIMENTAL_300K)
+#error "EML_FSK_EXPERIMENTAL_300K is defined for 64-byte frames only"
+#endif
 #else
 #error "EML_FRAME_SIZE must be 32 or 64"
 #endif
-static_assert(kProfile.frame_size <= RXBuffSize && kProfile.frame_size <= OTA_MAX_PACKET_SIZE, "radio buffers must hold an EML frame");
-static constexpr uint32_t kSlotUs = kProfile.slot_us;
+static_assert(kFrameSize <= RXBuffSize && kFrameSize <= OTA_MAX_PACKET_SIZE, "radio buffers must hold an EML frame");
+static_assert(kLoraProfile.frame_size == kFrameSize && kFskProfile.frame_size == kFrameSize, "one N for all PHYs");
+
+// P5.5 PHY order, index 0 preferred:
+//   EML_PHY_MODE 0 = LoRa only, 1 = FSK only, 2 (default) = FSK with LoRa fallback
+#if !defined(EML_PHY_MODE)
+#define EML_PHY_MODE 2
+#endif
+#if EML_PHY_MODE == 0
+static const EmlMacProfile_s kPhyOrder[] = {kLoraProfile};
+#elif EML_PHY_MODE == 1 || EML_PHY_MODE == 2
+#if !defined(SX127X_FSK_SUPPORT)
+#error "FSK PHY modes need SX127X_FSK_SUPPORT"
+#endif
+#if EML_PHY_MODE == 1
+static const EmlMacProfile_s kPhyOrder[] = {kFskProfile};
+#else
+static const EmlMacProfile_s kPhyOrder[] = {kFskProfile, kLoraProfile};
+#endif
+#else
+#error "EML_PHY_MODE must be 0, 1 or 2"
+#endif
 
 extern bool webserverPreventAutoStart;
 
@@ -54,6 +86,15 @@ static EmlTransportConfig_s transportConfig;
 static EmlUartStats_s uartStats;
 static EmlMacStats_s macStats;
 
+static EmlPhyPlan_s phyPlan;
+static EmlPhySelector phySelector;
+static const EmlMacProfile_s *profile = &kPhyOrder[0];
+static EmlFhssRecord_s fhssRecord;
+static EmlLinkQuality linkQuality;
+static int16_t rssiAvgX16 = 0;
+static bool coordinatorWasActive = false;
+static bool lockLost = false;
+
 static EmlMailbox rxMailbox;          // radio ISR -> foreground
 static EmlMailbox txMailbox;          // foreground -> timer ISR
 static EmlTicketRing<4> sentRing;     // timer ISR -> foreground, before any RX of the same pair
@@ -63,6 +104,8 @@ static volatile uint8_t macMode = MAC_OFF;
 static volatile bool macSuspended = false;
 // transport.generation() as seen by the ISRs; RX descriptors are stamped with it when armed
 static volatile uint32_t macGeneration = 0;
+// Slot length of the active PHY (ISR and foreground)
+static volatile uint32_t slotUs = kPhyOrder[0].slot_us;
 
 // Slot clock: written by the timer ISR, by the foreground only with the timer stopped
 static EmlSlotClock_s slotClock;
@@ -132,7 +175,7 @@ static void ICACHE_RAM_ATTR ownBoundary(uint32_t slot, uint16_t hop, uint32_t no
     while (txMailbox.pop(&isrTx[next]))
     {
         const EmlRadioDescriptor_s &d = isrTx[next];
-        if (d.ticket.slot == slot && d.ticket.generation == macGeneration && d.length == kProfile.frame_size)
+        if (d.ticket.slot == slot && d.ticket.generation == macGeneration && d.length == kFrameSize)
         {
             found = (int8_t)next;
             next ^= 1U;
@@ -154,7 +197,7 @@ static void ICACHE_RAM_ATTR ownBoundary(uint32_t slot, uint16_t hop, uint32_t no
         if (kRole == EML_COORDINATOR)
         {
             Radio.RXnb();
-            armRx(slot + 1U, hop, nowUs + kSlotUs, 0);
+            armRx(slot + 1U, hop, nowUs + slotUs, 0);
         }
     }
 }
@@ -189,17 +232,18 @@ static void ICACHE_RAM_ATTR emlTimerTock()
         // cache is off (config commit). The alarm keeps its grid: count the boundaries that
         // were masked so the slot/hop clock stays with the responder, and skip the radio
         // on a boundary that is serviced late.
+        const uint32_t slotLen = slotUs;
         uint32_t elapsed = nowUs - boundaryUs;
-        while (elapsed >= kSlotUs + kSlotUs / 2U)
+        while (elapsed >= slotLen + slotLen / 2U)
         {
             emlClockAdvance(slotClock);
-            elapsed -= kSlotUs;
+            elapsed -= slotLen;
             ++macStats.missed_boundaries;
         }
-        if (elapsed > kSlotUs + EML_GUARD_US)
+        if (elapsed > slotLen + EML_GUARD_US)
         {
             onTime = false;
-            nowUs -= elapsed - kSlotUs;
+            nowUs -= elapsed - slotLen;
         }
     }
     emlClockAdvance(slotClock);
@@ -236,7 +280,7 @@ static void ICACHE_RAM_ATTR emlTxDone()
     {
         // The responder answers on the same hop in the next slot
         Radio.RXnb();
-        armRx(slotClock.slot + 1U, slotClock.hop, boundaryUs + kSlotUs, 0);
+        armRx(slotClock.slot + 1U, slotClock.hop, boundaryUs + slotUs, 0);
     }
 }
 
@@ -248,7 +292,9 @@ static bool ICACHE_RAM_ATTR emlRxDone(SX12xxDriverCommon::rx_status const status
     // One frame per armed slot; the rendezvous search accepts every candidate
     if (!(armed.flags & EML_DESC_SEARCH))
         armed.taken = true;
-    if (rxMailbox.push(Radio.RXdataBuffer, kProfile.frame_size, armed.context, nullptr, rxUs, armed.start_us, armed.flags))
+    // LoRa: packet RSSI register; FSK: RSSI sampled by the driver at PayloadReady
+    const int8_t rssi = Radio.GetLastPacketRSSI(SX12XX_Radio_1);
+    if (rxMailbox.push(Radio.RXdataBuffer, kFrameSize, armed.context, nullptr, rxUs, armed.start_us, armed.flags, rssi))
         ++macStats.rx_frames;
     else
         ++macStats.rx_dropped;
@@ -311,7 +357,7 @@ static void prepareFor(uint32_t slot, uint16_t hop)
     if (!ready)
         return;
     const EmlRxContext_s context = {ticket.generation, slot, hop};
-    txMailbox.push(frame, kProfile.frame_size, context, &ticket);
+    txMailbox.push(frame, kFrameSize, context, &ticket);
 }
 
 static void enterSearch(uint32_t now, bool countLoss)
@@ -330,6 +376,7 @@ static void enterSearch(uint32_t now, bool countLoss)
     if (countLoss)
     {
         ++macStats.lock_losses;
+        lockLost = true;
         DBGLN("EML: lost coordinator, searching");
     }
 }
@@ -339,7 +386,7 @@ static void acquire(const EmlRadioDescriptor_s &d)
 {
     EmlFrameView_s view;
     EmlSync_s sync;
-    if (emlFrameDecode(d.bytes, d.length, kProfile.frame_size, &view) != EML_FRAME_OK ||
+    if (emlFrameDecode(d.bytes, d.length, kFrameSize, &view) != EML_FRAME_OK ||
         view.header.pkt_type != EML_PKT_TYPE_SYNC ||
         emlSyncDecode(view.payload, view.header.payload_len, &sync) != EML_SYNC_OK ||
         sync.phase != EML_SYNC_HELLO || sync.sender_id != transportConfig.peer_id ||
@@ -348,13 +395,13 @@ static void acquire(const EmlRadioDescriptor_s &d)
         return;
 
     EmlAcquire_s a;
-    if (!emlAcquire(slotClock.slot, sync.slot_counter, sync.hop_index, hopCount, d.rx_us, micros(), kProfile, &a))
+    if (!emlAcquire(slotClock.slot, sync.slot_counter, sync.hop_index, hopCount, d.rx_us, micros(), *profile, &a))
         return;
 
     // Load the clock so the first timer boundary starts a.first_slot
     slotClock.slot = a.clock_slot;
     slotClock.hop = a.clock_hop;
-    publishBoundary(a.clock_slot, a.clock_hop, a.first_boundary_us - kSlotUs);
+    publishBoundary(a.clock_slot, a.clock_hop, a.first_boundary_us - slotUs);
 
     const EmlRxContext_s context = {d.context.generation, a.hello_slot, sync.hop_index};
     const EmlReceiveResult_e result = transport.receive(d.bytes, d.length, context, emlNextOwnSlot(a.clock_slot, kRole));
@@ -368,6 +415,8 @@ static void acquire(const EmlRadioDescriptor_s &d)
     EML_CRITICAL_EXIT();
     lastHeardSlot = a.hello_slot;
     prepSlot = peerProcessedSlot = 0xFFFFFFFFUL;
+    linkQuality.reset(a.hello_slot >> 1);
+    linkQuality.received(a.hello_slot >> 1);
 
     if (emlOwnSlot(a.first_slot, kRole))
     {
@@ -390,13 +439,13 @@ static void acquire(const EmlRadioDescriptor_s &d)
     while ((int32_t)(a.first_boundary_us - resumeLeadUs - micros()) > 0) {}
     hwTimer::resume();
     ++macStats.acquisitions;
-    DBGLN("EML: locked slot=%u hop=%u", a.first_slot, a.clock_hop);
+    DBGLN("EML: locked phy=%u slot=%u hop=%u", profile->phy_profile, a.first_slot, a.clock_hop);
 }
 
 static void trackPhase(const EmlRadioDescriptor_s &d)
 {
-    int32_t correction = emlPhaseCorrection(d.rx_us, d.slot_start_us, kProfile);
-    const int32_t limit = (int32_t)(kSlotUs / 4U);
+    int32_t correction = emlPhaseCorrection(d.rx_us, d.slot_start_us, *profile);
+    const int32_t limit = (int32_t)(slotUs / 4U);
     if (correction > limit) correction = limit;
     if (correction < -limit) correction = -limit;
     hwTimer::phaseShift(correction / 2);
@@ -413,10 +462,13 @@ static void handleRx(const EmlRadioDescriptor_s &d, uint32_t now)
     if (macMode != MAC_LOCKED)
         return;
 
-    if (kRole == EML_RESPONDER)
+    EmlFrameView_s view;
+    if (emlFrameDecode(d.bytes, d.length, kFrameSize, &view) == EML_FRAME_OK)
     {
-        EmlFrameView_s view;
-        if (emlFrameDecode(d.bytes, d.length, kProfile.frame_size, &view) == EML_FRAME_OK)
+        // Link quality and RSSI count every intact peer frame, whatever the session state
+        linkQuality.received(d.context.slot >> 1);
+        rssiAvgX16 = (int16_t)(rssiAvgX16 + ((int16_t)(d.rssi * 16) - rssiAvgX16) / 8);
+        if (kRole == EML_RESPONDER)
         {
             lastHeardSlot = d.context.slot;
             trackPhase(d);
@@ -441,48 +493,109 @@ static void updateConnectionState()
     }
 }
 
+// Configure the radio, transport and timer for phySelector.profile(). The slot clock and
+// generation counting continue across PHY changes; the transport restarts its search.
+static bool applyPhy()
+{
+    profile = &phySelector.profile();
+    EML_CRITICAL_ENTER();
+    macMode = MAC_OFF;
+    armed.valid = false;
+    txActive = false;
+    EML_CRITICAL_EXIT();
+    hwTimer::stop();
+    Radio.SetTxIdleMode();
+
+    bool ok;
+#if defined(SX127X_FSK_SUPPORT)
+    if (emlIsFsk(*profile))
+    {
+        // P5.1: GFSK packet mode, fixed N, sync word from the binding UID
+        SX127xFskParams_s fsk = {profile->bitrate, profile->fdev_hz, profile->rxbw_hz,
+                                 (uint8_t)(profile->shaping << 5), profile->preamble, EML_FSK_SYNC_BYTES, {}};
+        emlFskSyncWord(UID, fsk.sync);
+        ok = Radio.ConfigFsk(fsk, syncFreq, kFrameSize);
+    }
+    else
+#endif
+    {
+        // P4.2: BW500 / SF6 (implicit header, fixed N) / CR4/5; errata 2.1 is applied by SetBandwidthCodingRate()
+        Radio.Config(SX127x_BW_500_00_KHZ, SX127x_SF_6, SX127x_CR_4_5, syncFreq, profile->preamble, (UID[5] & 0x01), kFrameSize);
+        ok = true;
+    }
+    ok = ok && Radio.PayloadLength == kFrameSize;
+
+    slotUs = profile->slot_us;
+    transportConfig = emlMacTransportConfig(kRole, emlDeriveLinkIds(UID, *profile, fhssRecord), *profile, hopCount);
+    researchSlots = (uint16_t)(transportConfig.link_timeout_slots + 4U);
+    const uint32_t now = emlNextOwnSlot(slotClock.slot, kRole);
+    ok = ok && transport.begin(transportConfig, freshEpochSeed(), now);
+    publishGeneration();
+    if (!ok)
+    {
+        ERRLN("EML: bridge configuration rejected");
+        setConnectionState(radioFailed);
+        return false;
+    }
+    DBGLN("EML: phy=%u N=%u slot=%uus toa=%uus hops=%u cfg=%x", profile->phy_profile, kFrameSize, profile->slot_us,
+          emlProfileToaUs(*profile), hopCount, transportConfig.configuration_id);
+
+    hwTimer::updateInterval(profile->slot_us);
+    prepSlot = peerProcessedSlot = 0xFFFFFFFFUL;
+    linkQuality.reset((slotClock.slot + 1U) >> 1);
+    coordinatorWasActive = false;
+    if (kRole == EML_COORDINATOR)
+    {
+        publishBoundary(slotClock.slot, slotClock.hop, micros());
+        macMode = MAC_LOCKED;
+        hwTimer::resume();
+    }
+    else
+    {
+        enterSearch(now, false);
+    }
+    return true;
+}
+
 void emlBridgeBegin()
 {
     hopCount = FHSSgetSequenceCount();
     freqStart = FHSSconfig->freq_start;
     freqSpread = freq_spread;
     syncFreq = FHSSgetInitialFreq();
+    fhssRecord = {FHSSconfig->freq_start, FHSSconfig->freq_stop, FHSSconfig->freq_count, OtaGetUidSeed(), hopCount};
 
-    const EmlFhssRecord_s fhss = {FHSSconfig->freq_start, FHSSconfig->freq_stop, FHSSconfig->freq_count, OtaGetUidSeed(), hopCount};
-    transportConfig = emlMacTransportConfig(kRole, emlDeriveLinkIds(UID, kProfile, fhss), kProfile, hopCount);
-    researchSlots = (uint16_t)(transportConfig.link_timeout_slots + 4U);
+    phyPlan = emlPhyPlan(kPhyOrder, (uint8_t)(sizeof(kPhyOrder) / sizeof(kPhyOrder[0])), FHSSconfig->freq_count);
+    phySelector.begin(phyPlan, kRole, millis());
 
     Radio.RXdoneCallback = &emlRxDone;
     Radio.TXdoneCallback = &emlTxDone;
-    // P4.2: BW500 / SF6 (implicit header, fixed N) / CR4/5; errata 2.1 is applied by SetBandwidthCodingRate()
-    Radio.Config(SX127x_BW_500_00_KHZ, SX127x_SF_6, SX127x_CR_4_5, syncFreq, kProfile.preamble, (UID[5] & 0x01), kProfile.frame_size);
-
     emlClockInit(slotClock, hopCount);
     publishBoundary(slotClock.slot, slotClock.hop, micros());
-    if (Radio.PayloadLength != kProfile.frame_size ||
-        !transport.begin(transportConfig, freshEpochSeed(), emlNextOwnSlot(slotClock.slot, kRole)))
-    {
-        ERRLN("EML: bridge configuration rejected");
-        setConnectionState(radioFailed);
-        return;
-    }
-    publishGeneration();
-    DBGLN("EML: N=%u slot=%uus toa=%uus hops=%u cfg=%x", kProfile.frame_size, kSlotUs, emlProfileToaUs(kProfile),
-          hopCount, transportConfig.configuration_id);
-
     hwTimer::init(kRole == EML_RESPONDER ? emlTimerTick : nullptr, emlTimerTock);
-    hwTimer::updateInterval(kSlotUs);
     setConnectionState(disconnected);
+    applyPhy();
+}
 
+// P5.5: cycle PHYs while unlinked, return to the preferred PHY after a loss
+static void updatePhy()
+{
+    bool change;
     if (kRole == EML_COORDINATOR)
     {
-        macMode = MAC_LOCKED;
-        hwTimer::resume();
+        const bool active = transport.active();
+        const bool lost = coordinatorWasActive && !active;
+        coordinatorWasActive = active;
+        change = phySelector.update(millis(), active, transport.state() == EML_HELLO, lost);
     }
     else
     {
-        enterSearch(emlNextOwnSlot(slotClock.slot, kRole), false);
+        const bool lost = lockLost;
+        lockLost = false;
+        change = phySelector.update(millis(), macMode == MAC_LOCKED, macMode == MAC_SEARCH, lost);
     }
+    if (change)
+        applyPhy();
 }
 
 void emlBridgeLoop()
@@ -517,12 +630,20 @@ void emlBridgeLoop()
     {
         enterSearch(now, true);
     }
+    if (macMode == MAC_LOCKED)
+    {
+        // one pair of grace so a frame still in flight is not counted as lost
+        linkQuality.finalizeBefore((b.slot >> 1) - 1U);
+    }
+    updatePhy();
+    if (macMode == MAC_OFF)
+        return;
 
     // 4. Prepare the next own slot: early (stale ACK, covers a lost peer frame) and
     //    once more after the peer frame of the preceding slot was processed
     if (macMode == MAC_LOCKED)
     {
-        const int32_t remaining = (int32_t)(b.us + (now - b.slot) * kSlotUs - micros());
+        const int32_t remaining = (int32_t)(b.us + (now - b.slot) * slotUs - micros());
         if (remaining > (int32_t)EML_PREP_MARGIN_US)
         {
             if (prepSlot != now)
@@ -562,5 +683,20 @@ bool emlBridgeActive() { return transport.active(); }
 const EmlTransportStats_s &emlBridgeTransportStats() { return transport.stats(); }
 const EmlUartStats_s &emlBridgeUartStats() { return uartStats; }
 const EmlMacStats_s &emlBridgeMacStats() { return macStats; }
+
+EmlLinkStats_s emlBridgeLinkStats()
+{
+    EmlLinkStats_s stats;
+    stats.phy_profile = profile->phy_profile;
+    stats.lq = linkQuality.lq();
+    stats.per = (uint8_t)(linkQuality.samples() ? 100U - stats.lq : 0U);
+    stats.rssi = (int8_t)(rssiAvgX16 / 16);
+#if defined(SX127X_FSK_SUPPORT)
+    stats.fsk_fifo_overruns = Radio.FskFifoOverruns;
+#else
+    stats.fsk_fifo_overruns = 0;
+#endif
+    return stats;
+}
 
 #endif // EML_BRIDGE

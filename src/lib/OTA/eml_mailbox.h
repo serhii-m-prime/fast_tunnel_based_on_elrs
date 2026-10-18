@@ -12,6 +12,7 @@ struct EmlRadioDescriptor_s
     uint32_t rx_us;         // RX: micros() at the RX-done callback
     uint32_t slot_start_us; // RX: local boundary of context.slot (MAC phase tracking)
     uint8_t flags;          // RX: EML_DESC_* MAC flags
+    int8_t rssi;            // RX: packet RSSI in dBm (LoRa packet RSSI, FSK RSSI at PayloadReady)
 };
 
 #define EML_DESC_SEARCH 0x01U // received while the responder was unlocked; context.slot/hop unknown
@@ -32,7 +33,8 @@ class EmlMailbox
 public:
     __attribute__((always_inline)) inline bool push(const uint8_t *bytes, size_t length, const EmlRxContext_s &context,
                                                    const EmlTxTicket_s *ticket = nullptr,
-                                                   uint32_t rxUs = 0, uint32_t slotStartUs = 0, uint8_t flags = 0)
+                                                   uint32_t rxUs = 0, uint32_t slotStartUs = 0, uint8_t flags = 0,
+                                                   int8_t rssi = 0)
     {
         if (!bytes || (length != 32 && length != 64)) return false;
         if (ticket && (!ticket->serial || ticket->generation != context.generation || ticket->slot != context.slot)) return false;
@@ -54,6 +56,7 @@ public:
         entry.rx_us = rxUs;
         entry.slot_start_us = slotStartUs;
         entry.flags = flags;
+        entry.rssi = rssi;
         __atomic_store_n(&head_, head + 1U, __ATOMIC_RELEASE);
         return true;
     }
@@ -79,6 +82,7 @@ public:
         out->rx_us = entry.rx_us;
         out->slot_start_us = entry.slot_start_us;
         out->flags = entry.flags;
+        out->rssi = entry.rssi;
         __atomic_store_n(&tail_, tail + 1U, __ATOMIC_RELEASE);
         return true;
     }
