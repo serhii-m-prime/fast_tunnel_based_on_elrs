@@ -1,6 +1,7 @@
 #include "CRSFRouter.h"
 #include "LowPassFilter.h"
 #include "rxtx_common.h"
+#include "eml_bridge.h"
 
 #include "crc.h"
 #include "stubborn_sender.h"
@@ -478,11 +479,13 @@ bool ICACHE_RAM_ATTR HandleSendDataDl()
     bool sendGeminiBuffer = false;
 
     bool tlmQueued = false;
+#if !defined(EML_BRIDGE)
     if (firmwareOptions.is_airport)
     {
         tlmQueued = ((SerialAirPort *)serialIO)->isTlmQueued();
     }
     else
+#endif
     {
         tlmQueued = DataDlSender.IsActive();
     }
@@ -518,11 +521,14 @@ bool ICACHE_RAM_ATTR HandleSendDataDl()
         }
 
         otaPkt.std.type = PACKET_TYPE_DATA;
+#if !defined(EML_BRIDGE)
         if (firmwareOptions.is_airport)
         {
             OtaPackAirportData(&otaPkt, &((SerialAirPort *)serialIO)->apInputBuffer);
         }
-        else if (OtaIsFullRes)
+        else
+#endif
+        if (OtaIsFullRes)
         {
             GenerateOtaDataDl(full, data_dl, nullptr);
         }
@@ -882,11 +888,13 @@ void GotConnection(unsigned long now)
     GotConnectionMillis = now;
     webserverPreventAutoStart = true;
 
+#if !defined(EML_BRIDGE)
     if (firmwareOptions.is_airport)
     {
         ((SerialAirPort *)serialIO)->apInputBuffer.flush();
         ((SerialAirPort *)serialIO)->apOutputBuffer.flush();
     }
+#endif
 
     DBGLN("got conn");
 }
@@ -943,6 +951,7 @@ void ICACHE_RAM_ATTR OnELRSBindMSP(uint8_t* newUid4)
 
 static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const otaPktPtr)
 {
+#if !defined(EML_BRIDGE)
     if (firmwareOptions.is_airport)
     {
         if (connectionState == connected)
@@ -952,6 +961,7 @@ static void ICACHE_RAM_ATTR ProcessRfPacket_DataUl(OTA_Packet_s const * const ot
         }
         return;
     }
+#endif
 
     uint8_t packageIndex;
     uint8_t const * payload;
@@ -1318,8 +1328,10 @@ static void setupSerial()
         {
             serialIO = new SerialAirPort(SERIAL_PROTOCOL_TX, SERIAL_PROTOCOL_RX);
         }
+#if !defined(EML_BRIDGE)
         ((SerialAirPort *)serialIO)->apInputBuffer.flush();
         ((SerialAirPort *)serialIO)->apOutputBuffer.flush();
+#endif
         return;
     }
 
@@ -1682,6 +1694,12 @@ static void setupRadio()
 
     DynamicPower_UpdateRx(true);  // Call before SetRFLinkRate(). The LR1121 Radio lib can now set the correct output power in Config().
 
+#if defined(EML_BRIDGE)
+    // EML MAC owns PHY, slot timer, FHSS and the rendezvous search
+    emlBridgeBegin();
+    return;
+#endif
+
     Radio.RXdoneCallback = &RXdoneISR;
     Radio.TXdoneCallback = &TXdoneISR;
 
@@ -1748,6 +1766,10 @@ static void cycleRfMode(unsigned long now)
 
 static void EnterBindingMode()
 {
+#if defined(EML_BRIDGE)
+    DBGLN("EML bridge: bind over the air is not supported, use the binding phrase");
+    return;
+#endif
     if (InBindingMode)
     {
         DBGLN("Already in binding mode");
@@ -2173,9 +2195,11 @@ void setup()
             // RFnoiseFloor = MeasureNoiseFloor(); //TODO move MeasureNoiseFloor to driver libs
             // DBGLN("RF noise floor: %d dBm", RFnoiseFloor);
 
+#if !defined(EML_BRIDGE)
             DataUlReceiver.SetDataToReceive(DataUlBuffer, ELRS_DATA_UL_BUFFER);
             Radio.RXnb();
             hwTimer::init(HWtimerCallbackTick, HWtimerCallbackTock);
+#endif
         }
     }
 
@@ -2189,12 +2213,47 @@ void setup()
     RFmodeLastCycled = millis();
 }
 
+#if defined(EML_BRIDGE)
+static void emlCheckConfigChangePending()
+{
+    if (!config.IsModified() || connectionState >= NO_CONFIG_SAVE_STATES)
+        return;
+    // No radio SPI while the EEPROM commit may disable the flash cache; ARQ recovers the slots
+    emlBridgeSuspend(true);
+    const uint32_t changes = config.Commit();
+    emlBridgeSuspend(false);
+    devicesTriggerEvent(changes);
+}
+
+static void emlLoop()
+{
+    const unsigned long now = millis();
+
+    devicesUpdate(now);
+    // UART0 <-> EML transport through SerialAirPort
+    handleSerialIO();
+    checkRebootTime(now);
+    emlCheckConfigChangePending();
+    executeDeferredFunction(micros());
+
+    if (connectionState > MODE_STATES)
+        return;
+
+    emlBridgeLoop();
+    DynamicPower_UpdateRx(false);
+}
+#endif
+
 #if defined(PLATFORM_ESP32_C3)
 void main_loop()
 #else
 void loop()
 #endif
 {
+#if defined(EML_BRIDGE)
+    emlLoop();
+    return;
+#endif
     unsigned long now = millis();
 
     if (!firmwareOptions.is_airport && DataUlReceiver.HasFinishedData())

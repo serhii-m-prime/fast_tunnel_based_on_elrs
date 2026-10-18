@@ -11,6 +11,7 @@
 #include "eml_sync.h"
 #include "eml_uart.h"
 #include "eml_mailbox.h"
+#include "eml_mac.h"
 
 #define UID_LEN             6
 

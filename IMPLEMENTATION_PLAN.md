@@ -116,12 +116,14 @@ ELRS_UNIFIED_CONFIG=happymodel.rx_900.es900 \
 
 Залежності: етапи 1–3; початкова інтеграція може передувати апаратному P1.7. Результат: перший працездатний EML-міст на LoRa.
 
+Реалізація, таймінги та ISR/MAC-контракт: [docs/EML_MAC.md](docs/EML_MAC.md). P4.2–P4.6 перевірено розрахунком, native-симуляцією MAC+transport і збірками; стендові вимірювання — P4.7.
+
 - [x] **P4.1** Розширити залежні RX/TX-буфери, FIFO/SPI-операції та перевірки довжини до 32/64 байтів; обмежити зміни Bridge-режимом там, де це потрібно для сумісності інших таргетів.
-- [ ] **P4.2** Додати LoRa BW500/SF6/CR4/5 із заздалегідь відомою фізичною довжиною пакета; зберегти SF6 implicit header і BW500 errata.
-- [ ] **P4.3** Розрахувати ToA для всіх довжин і профілів із точними preamble/header/CRC параметрами; додати SPI, synth/turnaround, обробку IRQ й запас перед встановленням `interval`.
-- [ ] **P4.4** Реалізувати симетричний TDD: один слот TX → RX, один слот RX → TX; явно відокремити цей розклад від позначень telemetry ratio у штатному ELRS.
-- [ ] **P4.5** Додати синхронізацію слотів, guard time, keepalive, повторний пошук peer після пропусків; узгодити просування FHSS при втратах кадрів.
-- [ ] **P4.6** Інтегрувати EML із UART і ARQ; збирати обидва Bridge-таргети, порівняти RAM/Flash/IRAM із базовими значеннями.
+- [x] **P4.2** Додати LoRa BW500/SF6/CR4/5 із заздалегідь відомою фізичною довжиною пакета; зберегти SF6 implicit header і BW500 errata.
+- [x] **P4.3** Розрахувати ToA для всіх довжин і профілів із точними preamble/header/CRC параметрами; додати SPI, synth/turnaround, обробку IRQ й запас перед встановленням `interval`.
+- [x] **P4.4** Реалізувати симетричний TDD: один слот TX → RX, один слот RX → TX; явно відокремити цей розклад від позначень telemetry ratio у штатному ELRS.
+- [x] **P4.5** Додати синхронізацію слотів, guard time, keepalive, повторний пошук peer після пропусків; узгодити просування FHSS при втратах кадрів.
+- [x] **P4.6** Інтегрувати EML із UART і ARQ; збирати обидва Bridge-таргети, порівняти RAM/Flash/IRAM із базовими значеннями.
 - [ ] **P4.7** На стенді перевірити двобічні бінарні потоки, втрати пакетів, затримки, повтори й тривалу роботу на LoRa; зафіксувати корисну швидкість для 32/64-байтових кадрів.
 
 ## Етап 5. FSK/GFSK у SX127xDriver
@@ -176,11 +178,10 @@ ELRS_UNIFIED_CONFIG=happymodel.rx_900.es900 \
 - [ ] **P8.5** Перевірити GPIO17 вентилятора TX, увімкнення від 250 мВт, мінімальний час роботи й налаштування порога; використовувати вимірювання температури лише якщо відповідний датчик реально доступний.
 - [ ] **P8.6** Виміряти вихідну потужність, струм живлення й нагрівання на всіх підтримуваних рівнях та робочих частотах; зафіксувати обмеження RF-тракту й охолодження.
 - [ ] **P8.7** Розробити легкий мінімалістичний Wi-Fi WebUI (чистий ванільний HTML5/CSS/JS без важких фреймворків Vite/Vue) зі збереженням 100% функціоналу та інтеграцією параметрів форку:
-  - **OTA та сервіс:** прошивка файлу `.bin` через `/update` з індикатором прогресу, збереження параметрів у LittleFS `/options.json`, перезавантаження (`/reboot`).
+  - **OTA та сервіс:** прошивка файлу `.bin` через `/update` з індикатором прогресу, збереження параметрів у LittleFS `/options.json`, інформація про плату/прошивку, перезавантаження (`/reboot`).
   - **Радіо та бенди:** вибір стартового Default Band (`Band 0..3`), перемикач Adaptive Fallback (On/Off), налаштування порогу деградації LQ, вибір робочого PHY-профілю (GFSK 250k, GFSK 500k, LoRa SF6).
   - **UART та транспорт:** швидкість порту (57600..460800 бод), апаратна інверсія сигналу (Normal / Inverted для прямого підключення SBUS), режим TDD-слотів (Symmetric 1:1 / Adaptive Dynamic).
   - **Потужність та охолодження:** вибір фіксованої потужності (10..1000 мВт), активація Dynamic Power, поріг увімкнення кулера.
-  - **Live Monitor (діагностика без перезавантаження):** динамічне відображення активного бенду/частоти, RSSI, SNR, Link Quality (LQ %), лічильників байтів UART Uplink/Downlink.
   - **Оптимізація пам'яті:** зменшення розміру бінарного образу WebContent з ~50 КБ до <5 КБ gzip для економії Flash і миттєвого завантаження інтерфейсу на ESP8285.
 
 ## Етап 9. Приймальні випробування та документація
@@ -223,6 +224,11 @@ ELRS_UNIFIED_CONFIG=happymodel.rx_900.es900 \
 | 2026-10-18 | P3.8 | Після звичайної успішної компіляції ELF audit виявив flash-інстанціації шаблонних ISR helper попри section attribute. Короткі pack/unpack/FIFO try/lock/size примусово вбудовано в IRAM radio callers; обидві збірки й native повторено. MCU probe з фактичними PIO flags та -fno-lto підтвердив IRAM wrapper/leaf, DRAM data, відсутність heap/log/libatomic calls; перевірено linked DIO/radio/timer ISR й ESP8285 UART ISR/FIFO copy. ESP8285 lock відновлює попередній PS. ESP32 SDK UART ISR залишається flash із intr_alloc_flags=0 і маскується під час cache-off; radio ISR його не викликає. CRC/Sync/ARQ/UART працюють foreground, mailbox ISR copy <=64 B. RF MAC wiring і часові вимірювання — P4; після інтеграції потрібен повторний audit. |
 | 2026-10-18 | P3.9 | Додано 14 transport-тестів: обидва N, втрати кожної Sync-фази/data/ACK, CRC, 4096/3073-байтові бінарні потоки в обох напрямках із шумом/паузами UART, overflow/PAUSE, дублікат, sequence wrap, 16/32-bit slot wrap, generation/capture freshness, reboot обох сторін і probe timeout, непереданий TX/неправильний ACK, partial UART, mailbox full/stamp. Вихід у межах сесії збігається побайтово й одноразово; на reset хвіст відкидається за специфікацією. Повний native — 197/197 (16 suites), transport ASan/UBSan зі строгим C++11 — 14/14; фінальні TX/RX, конфігурації, RAM/IRAM й ISR audit — PASS. Фізичних RF-тестів не було. |
 | 2026-10-18 | P4.1 | У Bridge (`USE_AIRPORT_AT_BAUD`) `RXBuffSize` радіо збільшено 16→64 B, `OTA_Packet_s` отримав перший член `raw[OTA_MAX_PACKET_SIZE]` (64 B у Bridge, 13 B інакше), тож TX-буфери tx/rx_main вміщують 64-байтовий EML-кадр, а `= {0}` обнуляє весь буфер. `static_assert` у `common.cpp`/`OTA.cpp` зв'язують розміри OTA- і радіобуфера. `SX127xDriver::Config` відхиляє `PayloadLength` 0 або >`RXBuffSize` із ERRLN, зберігаючи попереднє значення. SPIEx передає ≤64 B за транзакцію (16 слів W0–W15 на ESP32/ESP8266), тож 64 B + адреса переповнили б апаратний буфер: новий `SX127xSpiBurst.h` ділить burst на транзакції ≤63 B даних (RegFifo лишає адресу 0x00, бо RegFifoAddrPtr інкрементується в радіо; інші регістри — reg+offset), VLA на стеку замінено фіксованим 64-байтовим буфером. 8/13-байтові пакети й FRF лишаються однією транзакцією; поведінка штатних SX127x-таргетів не змінюється. Новий `test_sx127x_spi` (6 тестів, модель FIFO SX127x) перевіряє всі довжини 0–255 з wrap адреси FIFO, розбиття 64→64+2 B, межу транзакції та вирівнювання; `test_ota` — розмір/обнулення `OTA_Packet_s`. Native — 204/204 (17 suites). Обидва Bridge-таргети та штатний `Unified_ESP8285_900_RX_via_UART` (FCC915) — SUCCESS. ELF: HAL burst read/write, `RXnbISR`, `TXnb`, `CheckForSecondPacket`, `SPIExClass::_transfer` в IRAM, helper вбудовані; RX копіює через ROM `memcpy`, TX — inline, `__stack_chk_fail` в IRAM. Чинні ModParams, PHY, FHSS та interval не змінено (8/13 B), ToA без змін; 64-байтове SPI-читання при 10 МГц ≈53 µs у DIO ISR проти ≈11 µs для 13 B — врахувати в P4.3. 32/64-байтові профілі — P4.2, на реальному SX1276 розбиття не перевірялося (P4.7). |
+| 2026-10-18 | P4.2 | Новий прапорець `EML_BRIDGE` в обох Bridge-оточеннях замінює штатний RF-канал ELRS на EML MAC ([EML_MAC.md](docs/EML_MAC.md)). `emlBridgeBegin()` конфігурує LoRa BW500/SF6/CR4/5, preamble 8, implicit header, апаратний CRC вимкнено, фіксована довжина N=64 (або 32 через `EML_FRAME_SIZE`); BW500 errata §2.1/§2.3 і SF6 detection optimize застосовує наявний драйвер. Довжина перевіряється (`Radio.PayloadLength == N`, P4.1), інакше `radioFailed`. Профілі в `eml_mac.h` з `static_assert` на ToA і бюджет. Апаратно не перевірено. |
+| 2026-10-18 | P4.3 | `emlLoraToaUs()` — формула Semtech у `constexpr`; збігається з таблицею ELRS (4384/6688/8768 проти 4380/6690/8770 мкс). ToA: 16 032 мкс (N=64), 8 992 мкс (N=32). Бюджет слота: TX start 250 (ISR, частота, FIFO burst ~53 мкс, FSTX/PA) + ToA + RX done 200 (демодулятор, ISR, FIFO) + обробка 600 + guard 300 = 17 382 / 10 342 мкс → слот 17 500 / 10 400 мкс. Розрахункова швидкість на напрямок 1714 / 1346 B/s проти ~500 B/s штатного AirPort 200 Гц 1:2. Допуск фази responder для N=64: δ ∈ (−1,4; +0,5) мс, ціль −100 мкс. Затримки TX start/RX done оцінені й мають бути виміряні в P4.7. |
+| 2026-10-18 | P4.4 | Симетричний TDD без зв'язку з TLM ratio ELRS: парні слоти — coordinator (ES900TX), непарні — responder (ES900RX), одна пара — один hop. `EmlSlotClock_s` просуває hop на кожному парному слоті незалежно від приймання, з 32-бітним wrap. Coordinator після TX done слухає на тому ж hop; responder на парній межі змінює частоту й слухає, на непарній передає. Транспорт отримує монотонний час `emlNextOwnSlot()`. |
+| 2026-10-18 | P4.5 | Rendezvous на sync channel ELRS (раз на 40 hop = 80 слотів). Захоплення з HELLO (`emlAcquire`): розширений слот лише вперед, межа = RX − (TX start + ToA + RX done) − bias 100 мкс, lead 600 мкс, вік ≤3 слоти. Фаза responder: половина похибки за кожним CRC-валідним кадром coordinator у `hwTimer::phaseShift` (±слот/4). KEEPALIVE у кожному власному слоті. Coordinator після link timeout (1,5 с = 86/145 слотів) шле HELLO; responder після link timeout + 4 слоти без кадрів повертається в пошук. Coordinator на ESP32 надолужує межі, замасковані під час cache-off. Native-симуляція з реальною FHSS-послідовністю (240 hop) — PASS. |
+| 2026-10-18 | P4.6 | `rxtx_eml_bridge.cpp`: timer/DIO ISR (IRAM) ↔ foreground через RX/TX `EmlMailbox` і `EmlTicketRing`; TX-звіти перед RX, generation стампується при arm, ISR передає лише дескриптор поточних слота й generation; раннє й пізнє готування кадра з запасом 400 мкс; seqlock для межі слота. Кільця транспорту (4096/1024 B) замінили legacy AirPort FIFO у `tx_main.cpp` і `SerialAirPort`. UART TX/RX — через `emlBridgeRead/DrainSerial`. `connectionState` відповідає ACTIVE; config commit призупиняє радіо; потужність фіксована з конфігурації (Dynamic Power — P8.4); bind over the air вимкнено. `hardware_pin/flag/int` переведено в IRAM: ELF-аудит RX знайшов їх виклик із RFAMP у radio ISR (наявний ризик ELRS на ESP8266). Native 219/219 (18 suites), `test_eml_mac` 15/15 також під ASan/UBSan із `-std=c++11 -Wall -Wextra -Werror -pedantic`. Обидві Bridge-збірки — SUCCESS; ISR-граф RX без flash-викликів; на ESP32 timer/GPIO ISR без IRAM-прапорця маскуються під час cache-off. Фізичних RF-тестів не було. |
 
 Контрольні збірки P2.1:
 
@@ -331,3 +337,24 @@ export PLATFORMIO_BUILD_DIR="$PWD/.venv/build-p4.1"
 | `HappyModel_ES900RX_Bridge` | 52 128 / 81 920 | 561 030 / 991 216 | 38 903 / 49 152 | 10 249 |
 
 Порівняно з P3: TX RAM +96 B (два радіобуфери по +48), Flash +168, IRAM +80; RX RAM +144, Flash +820, IRAM +188. IRAM виміряно за `_iram_end - _iram_start` на TX та `_text_end - _text_start` на RX. Логи: `.venv/build-logs/p4.1-es900tx.log`, `p4.1-es900rx.log`, `p4.1-stock-es900rx.log`; native — у scratchpad сесії. Апаратні випробування не проводилися.
+
+Контрольні перевірки P4.2–P4.6 (2026-10-18):
+
+```bash
+export PLATFORMIO_CORE_DIR="$PWD/.venv/platformio"
+.venv/bin/pio test --project-dir src -e native
+export PLATFORMIO_BUILD_DIR="$PWD/.venv/build-p4"
+.venv/bin/pio run --project-dir src -e HappyModel_ES900TX_Bridge -j 4
+.venv/bin/pio run --project-dir src -e HappyModel_ES900RX_Bridge -j 4
+```
+
+Зовнішні `PLATFORMIO_BUILD_FLAGS` / `ELRS_UNIFIED_CONFIG` вимкнено. Native — 219/219 (18 suites). `test_eml_mac` окремо зібрано з ASan/UBSan (`-std=c++11 -Wall -Wextra -Werror -pedantic`, leak detection) — 15/15.
+
+| Таргет | RAM, байтів | Flash, байтів | IRAM, байтів | Вільна IRAM, байтів |
+| --- | ---: | ---: | ---: | ---: |
+| `HappyModel_ES900TX_Bridge` | 79 272 / 327 680 | 1 622 217 / 1 966 080 | 124 684 / 131 072 | 6 388 |
+| `HappyModel_ES900RX_Bridge` | 52 344 / 81 920 | 561 238 / 991 216 | 33 767 / 49 152 | 15 385 |
+
+Порівняно з P4.1: TX RAM +772, Flash −3 496, IRAM −1 240; RX RAM +216, Flash +208, IRAM −5 136. Порівняно з базовими FCC915-збірками P0: TX RAM +8 996, Flash +6 556, IRAM −796; RX RAM +2 580, Flash +2 884, IRAM −4 704. IRAM зменшилася, бо в `EML_BRIDGE` штатні ISR ELRS (`HWtimerCallbackTock`, `ProcessRFPacket`, `timerCallback`, `SendRCdataToRF`) більше не викликаються й лінкер їх прибирає (перевірено за символами ELF). IRAM виміряно за `_iram_end - _iram_start` на TX та `_text_end - _text_start` на RX.
+
+ELF-аудит (скрипт обходу call graph від `emlTimerTock`, `emlTimerTick`, `emlTxDone`, `emlRxDone`, `SX127xDriver::IsrCallback`, `SX127xHal::dioISR_1`): на RX усі цілі викликів — IRAM або ROM (`memcpy`), `micros` і `hardware_pin/flag/int` в IRAM; дві позначки «flash» виявилися даними після `ret`/`j` (перевірено ручним дизасемблюванням). На TX `micros` і `spiEnableSSPins` лежать у flash, як і в штатному ELRS: Arduino-ESP32 зібрано без `CONFIG_ARDUINO_ISR_IRAM`, тому timer і GPIO ISR маскуються під час cache-off. Логи: `.venv/build-logs/p4-es900tx.log`, `p4-es900rx.log`, `p4-sanitized.log`. Апаратні випробування не проводилися; таймінги TX start/RX done, фазова прив'язка, PER і throughput — P4.7.

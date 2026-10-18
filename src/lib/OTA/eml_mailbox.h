@@ -9,7 +9,12 @@ struct EmlRadioDescriptor_s
     uint8_t length;
     EmlRxContext_s context;
     EmlTxTicket_s ticket; // zero for RX, exact prepare() ticket for a TX handoff
+    uint32_t rx_us;         // RX: micros() at the RX-done callback
+    uint32_t slot_start_us; // RX: local boundary of context.slot (MAC phase tracking)
+    uint8_t flags;          // RX: EML_DESC_* MAC flags
 };
+
+#define EML_DESC_SEARCH 0x01U // received while the responder was unlocked; context.slot/hop unknown
 
 /**
  * Two-entry SPSC handoff for ISR <-> foreground (one mailbox per direction).
@@ -26,7 +31,8 @@ class EmlMailbox
 
 public:
     __attribute__((always_inline)) inline bool push(const uint8_t *bytes, size_t length, const EmlRxContext_s &context,
-                                                   const EmlTxTicket_s *ticket = nullptr)
+                                                   const EmlTxTicket_s *ticket = nullptr,
+                                                   uint32_t rxUs = 0, uint32_t slotStartUs = 0, uint8_t flags = 0)
     {
         if (!bytes || (length != 32 && length != 64)) return false;
         if (ticket && (!ticket->serial || ticket->generation != context.generation || ticket->slot != context.slot)) return false;
@@ -45,6 +51,9 @@ public:
         entry.ticket.serial = ticket ? ticket->serial : 0;
         entry.ticket.type = ticket ? ticket->type : 0;
         entry.ticket.phase = ticket ? ticket->phase : 0;
+        entry.rx_us = rxUs;
+        entry.slot_start_us = slotStartUs;
+        entry.flags = flags;
         __atomic_store_n(&head_, head + 1U, __ATOMIC_RELEASE);
         return true;
     }
@@ -67,6 +76,9 @@ public:
         out->ticket.serial = entry.ticket.serial;
         out->ticket.type = entry.ticket.type;
         out->ticket.phase = entry.ticket.phase;
+        out->rx_us = entry.rx_us;
+        out->slot_start_us = entry.slot_start_us;
+        out->flags = entry.flags;
         __atomic_store_n(&tail_, tail + 1U, __ATOMIC_RELEASE);
         return true;
     }

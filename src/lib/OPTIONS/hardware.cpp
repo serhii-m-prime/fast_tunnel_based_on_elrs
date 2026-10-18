@@ -277,17 +277,19 @@ bool hardware_init(EspFlashStream &strmFlash)
     return true;
 }
 
-int hardware_pin(nameType name)
+// GPIO_PIN_* lookups run inside radio ISRs (RFAMP, SX127x HAL), which on ESP8266 also
+// execute while the flash cache is disabled
+int ICACHE_RAM_ATTR hardware_pin(nameType name)
 {
     return hardware[name].int_value;
 }
 
-bool hardware_flag(nameType name)
+bool ICACHE_RAM_ATTR hardware_flag(nameType name)
 {
     return hardware[name].bool_value;
 }
 
-int hardware_int(nameType name)
+int ICACHE_RAM_ATTR hardware_int(nameType name)
 {
     return hardware[name].int_value;
 }

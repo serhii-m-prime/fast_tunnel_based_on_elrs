@@ -1,4 +1,5 @@
 #include "rxtx_common.h"
+#include "eml_bridge.h"
 
 #include "CRSFHandset.h"
 #include "CRSFParameters.h"
@@ -53,10 +54,13 @@ static NullStream nullStream;
 Stream *TxUSB = &nullStream;
 
 // Variables / constants for Airport //
+#if !defined(EML_BRIDGE)
+// EML_BRIDGE: the EML transport rings replace these queues (rxtx_eml_bridge.cpp)
 FIFO<AP_MAX_BUF_LEN> apInputBuffer;
 FIFO<AP_MAX_BUF_LEN> apOutputBuffer;
 static EmlUartStats_s apUartStats;
 static volatile uint32_t apRadioRejectedFrames = 0;
+#endif
 
 #define UART_INPUT_BUF_LEN 1024
 FIFO<UART_INPUT_BUF_LEN> uartInputBuffer;
@@ -285,11 +289,13 @@ static bool ICACHE_RAM_ATTR ProcessDownlinkPacket(SX12xxDriverCommon::rx_status 
         break;
 
       case PACKET_TYPE_DATA:
+#if !defined(EML_BRIDGE)
         if (firmwareOptions.is_airport)
         {
           if (!OtaUnpackAirportData(otaPktPtr, &apOutputBuffer)) ++apRadioRejectedFrames;
         }
         else
+#endif
         {
           ProcessOtaDataDl(
             ota8->data_dl.packageIndex, ota8Second->data_dl.packageIndex,
@@ -320,11 +326,13 @@ static bool ICACHE_RAM_ATTR ProcessDownlinkPacket(SX12xxDriverCommon::rx_status 
         break;
 
       case PACKET_TYPE_DATA:
+#if !defined(EML_BRIDGE)
         if (firmwareOptions.is_airport)
         {
           if (!OtaUnpackAirportData(otaPktPtr, &apOutputBuffer)) ++apRadioRejectedFrames;
         }
         else
+#endif
         {
           ProcessOtaDataDl(
             otaPktPtr->std.data_dl.packageIndex, otaPktPtrSecond->std.data_dl.packageIndex,
@@ -574,11 +582,14 @@ void ICACHE_RAM_ATTR SendRCdataToRF()
   }
   else
   {
+#if !defined(EML_BRIDGE)
     if (firmwareOptions.is_airport)
     {
       OtaPackAirportData(&otaPkt, &apInputBuffer);
     }
-    else if ((NextPacketIsDataUl && DataUlSender.IsActive()) || dontSendChannelData)
+    else
+#endif
+    if ((NextPacketIsDataUl && DataUlSender.IsActive()) || dontSendChannelData)
     {
       otaPkt.std.type = PACKET_TYPE_DATA;
       if (OtaIsFullRes)
@@ -948,8 +959,10 @@ static void UpdateConnectDisconnectStatus()
       webserverPreventAutoStart = true;
       setConnectionState(connected);
 
+#if !defined(EML_BRIDGE)
       apInputBuffer.flush();
       apOutputBuffer.flush();
+#endif
       uartInputBuffer.flush();
     }
   }
@@ -1007,6 +1020,10 @@ void SendUIDOverMSP()
 
 static void EnterBindingMode()
 {
+#if defined(EML_BRIDGE)
+  DBGLN("EML bridge: bind over the air is not supported, use the binding phrase");
+  return;
+#endif
   if (InBindingMode)
       return;
 
@@ -1101,7 +1118,11 @@ static void HandleUARTout()
 {
   if (firmwareOptions.is_airport)
   {
+#if defined(EML_BRIDGE)
+    emlBridgeDrainSerial(*TxUSB);
+#else
     emlDrainSerial(*TxUSB, apOutputBuffer, apUartStats);
+#endif
   }
 }
 
@@ -1109,7 +1130,11 @@ static void HandleUARTin()
 {
   if (firmwareOptions.is_airport)
   {
+#if defined(EML_BRIDGE)
+    emlBridgeReadSerial(*TxUSB);
+#else
     emlReadSerial(*TxUSB, apInputBuffer, connectionState == connected, apUartStats);
+#endif
     return;
   }
 
@@ -1503,6 +1528,12 @@ void setup()
       DataDlReceiver.SetDataToReceive(CRSFinBuffer, sizeof(CRSFinBuffer));
 
       POWERMGNT::init();
+#if defined(EML_BRIDGE)
+      // EML MAC owns PHY, slot timer and FHSS. Dynamic Power needs EML link metrics (P8.4),
+      // so the configured fixed power is used; the fan follows it via the THERMAL device.
+      POWERMGNT::setPower((PowerLevels_e)config.GetPower());
+      emlBridgeBegin();
+#else
       DynamicPower_Init();
 
       // Set the pkt rate, TLM ratio, and power from the stored eeprom values
@@ -1511,6 +1542,7 @@ void setup()
       LbtCcaTimerStart();
       hwTimer::init(nullptr, timerCallback);
       setConnectionState(noCrossfire);
+#endif
     }
   }
   else
@@ -1528,19 +1560,59 @@ void setup()
 
   if (firmwareOptions.is_airport && connectionState < FAILURE_STATES)
   {
+#if !defined(EML_BRIDGE)
     apInputBuffer.flush();
     apOutputBuffer.flush();
+#endif
     uartInputBuffer.flush();
     while (TxUSB->available() > 0)
     {
       TxUSB->read();
     }
+#if !defined(EML_BRIDGE)
     UARTconnected();
+#endif
   }
 }
 
+#if defined(EML_BRIDGE)
+static void emlCheckConfigChangePending()
+{
+  if (!config.IsModified())
+    return;
+  // No radio SPI while the EEPROM commit may disable the flash cache; ARQ recovers the slots
+  emlBridgeSuspend(true);
+  const uint32_t changes = config.Commit();
+  POWERMGNT::setPower((PowerLevels_e)config.GetPower());
+  emlBridgeSuspend(false);
+  devicesTriggerEvent(changes);
+}
+
+static void emlLoop()
+{
+  const uint32_t now = millis();
+
+  HandleUARTout();
+  devicesUpdate(now);
+  checkBackpackUpdate();
+  checkRebootTime(now);
+  executeDeferredFunction(micros());
+  HandleUARTin();
+
+  if (connectionState > MODE_STATES)
+    return;
+
+  emlBridgeLoop();
+  emlCheckConfigChangePending();
+}
+#endif
+
 void loop()
 {
+#if defined(EML_BRIDGE)
+  emlLoop();
+  return;
+#endif
   uint32_t now = millis();
 
   HandleUARTout(); // Only used for non-CRSF output

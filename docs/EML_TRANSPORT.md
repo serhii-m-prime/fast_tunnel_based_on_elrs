@@ -2,15 +2,15 @@
 
 P3 реалізує foreground-транспорт у [`eml_transport.h`](../src/lib/OTA/eml_transport.h), bounded queues у [`eml_queue.h`](../src/lib/OTA/eml_queue.h), ISR handoff у [`eml_mailbox.h`](../src/lib/OTA/eml_mailbox.h) та UART batching у [`eml_uart.h`](../src/lib/OTA/eml_uart.h). Wire-формат і межі сесії визначено в [EML_PROTOCOL.md](EML_PROTOCOL.md).
 
-Новий транспорт поки не передає EML через радіо: підключення `prepare/receive` до великих RF-пакетів і TDD належить P4.1–P4.6. Наявний AirPort зберігає OTA 8/13 байтів, PHY/FHSS та interval; у ньому вже застосовано розширені статичні черги, безпечний прийом і bounded UART I/O. Штатні RC/CRSF-пакети не змінено. Наявний AirPort до P4.6 лишається без EML ARQ, тому його відкинуті RF-кадри лише рахуються й не отримують нових гарантій доставки.
+З P4.2–P4.6 Bridge-збірки (`EML_BRIDGE`) передають цей транспорт через радіо: LoRa-профіль, симетричний TDD, FHSS, захоплення та ISR-інтеграцію описано в [EML_MAC.md](EML_MAC.md). Legacy AirPort (OTA 8/13 байтів, FIFO нижче) лишається тільки для збірок з `USE_AIRPORT_AT_BAUD` без `EML_BRIDGE`; його відкинуті RF-кадри лише рахуються й не отримують гарантій доставки ARQ. Штатні RC/CRSF-пакети не змінено.
 
 ## Власність стану та буферів
 
 `EmlTransport<N>` має рівно одного foreground-власника. Його методи не викликаються паралельно чи з ISR. Кожен екземпляр містить дві статичні `EmlByteQueue<N>`: UART→RF та RF→UART. Payload не алокується в heap, не має семантики MAVLink/CRSF і не копіюється у додаткове ARQ-вікно: непідтверджений префікс лишається в UART→RF ring до ACK.
 
-Для ESP32 передбачено `N=4096` на напрямок, для ESP8285 — `N=1024`. Native `static_assert` обмежують розмір transport ESP32 <9000 B, а transport ESP8285 разом із двома mailbox <3000 B. Це бюджет бібліотеки, не вимірювання вільного стека/heap під RF-навантаженням. При P4.6 нові transport rings мають **замінити** legacy AirPort FIFO, а не дублювати їх.
+Для ESP32 передбачено `N=4096` на напрямок, для ESP8285 — `N=1024`. Native `static_assert` обмежують розмір transport ESP32 <9000 B, а transport ESP8285 разом із двома mailbox <3000 B. Це бюджет бібліотеки, не вимірювання вільного стека/heap під RF-навантаженням. У `EML_BRIDGE` (P4.6) transport rings **замінюють** legacy AirPort FIFO: ті не компілюються.
 
-У поточних Bridge-збірках `AP_MAX_BUF_LEN` становить 4096 на ESP32 TX і 1024 на RX. Два TX FIFO розміщено глобально; два RX FIFO — у static DRAM, об'єкт `SerialAirPort` зберігає посилання на них. Інші конфігурації без `USE_AIRPORT_AT_BAUD` зберігають 64 B. Радіодескриптори EML мають дві фіксовані комірки по максимум 64 B на mailbox; для RX і TX потрібні окремі SPSC mailbox, які MAC створить при P4.
+`AP_MAX_BUF_LEN` у Bridge-збірках становить 4096 на ESP32 TX і 1024 на RX і задає місткість transport rings. Legacy AirPort без `EML_BRIDGE` використовує ту саму місткість для FIFO (TX — глобальні, RX — static DRAM за посиланням із `SerialAirPort`). Інші конфігурації без `USE_AIRPORT_AT_BAUD` зберігають 64 B. Радіодескриптори EML мають дві фіксовані комірки по максимум 64 B на mailbox; MAC (`rxtx_eml_bridge.cpp`) використовує окремі RX і TX mailbox та `EmlTicketRing` для звітів про старт TX.
 
 ## Налаштування та Sync/reconnect
 
