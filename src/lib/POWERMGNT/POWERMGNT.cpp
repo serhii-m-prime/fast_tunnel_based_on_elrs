@@ -4,6 +4,7 @@
 
 #include "OTA.h"
 
+#if !defined(EML_BRIDGE)
 uint8_t powerToCrsfPower(PowerLevels_e Power)
 {
     // Crossfire's power levels as defined in opentx:radio/src/telemetry/crossfire.cpp
@@ -39,6 +40,7 @@ PowerLevels_e crsfPowerToPower(uint8_t crsfpower)
         return PWR_10mW;
     }
 }
+#endif
 
 #ifndef UNIT_TEST
 
@@ -215,7 +217,9 @@ void POWERMGNT::setPower(PowerLevels_e Power)
 #endif
 
     CurrentPower = Power;
+#if !defined(EML_BRIDGE)
     linkStats.uplink_TX_Power = powerToCrsfPower(PowerLevelContainer::currPower());
+#endif
     devicesTriggerEvent(EVENT_POWER_CHANGED);
 }
 

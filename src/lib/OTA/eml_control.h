@@ -1,0 +1,36 @@
+#pragma once
+
+#include "eml_sync.h"
+
+// Session-bound link control carried in a normal fixed-length SYNC frame.
+// 28 bytes fits EML32. Handshake phases 0..3 retain their existing layout.
+enum : uint8_t { EML_BAND_PROPOSE = 4, EML_BAND_ACK = 5, EML_BAND_COMMIT = 6, EML_BAND_STATUS = 7 };
+struct EmlBandMessage_s
+{
+    uint8_t op, band, mask;
+    uint16_t switch_slot, token; // STATUS: observed slot, (LQ << 8) | missed ACK count
+};
+
+inline bool emlBandMessageValid(const EmlBandMessage_s &m)
+{
+    return m.op >= EML_BAND_PROPOSE && m.op <= EML_BAND_STATUS && m.band < 4 &&
+        m.mask && !(m.mask & 0xF0U) && (m.mask & (1U << m.band)) &&
+        (m.op == EML_BAND_STATUS ? (m.token >> 8) <= 100 : m.token && !(m.switch_slot & 1U));
+}
+
+inline void emlBandMessageWrite(const EmlBandMessage_s &m, uint8_t *out)
+{
+    out[0] = EML_PROTOCOL_VERSION; out[1] = m.op; out[2] = m.band; out[3] = m.mask;
+    out[24] = (uint8_t)(m.switch_slot >> 8); out[25] = (uint8_t)m.switch_slot;
+    out[26] = (uint8_t)(m.token >> 8); out[27] = (uint8_t)m.token;
+}
+
+inline bool emlBandMessageRead(const uint8_t *in, size_t length, EmlBandMessage_s *out)
+{
+    if (!in || !out || length != EML_SYNC_PAYLOAD_SIZE || in[0] != EML_PROTOCOL_VERSION) return false;
+    EmlBandMessage_s m = {in[1], in[2], in[3], (uint16_t)((uint16_t)in[24] << 8 | in[25]),
+                                            (uint16_t)((uint16_t)in[26] << 8 | in[27])};
+    if (!emlBandMessageValid(m)) return false;
+    *out = m;
+    return true;
+}

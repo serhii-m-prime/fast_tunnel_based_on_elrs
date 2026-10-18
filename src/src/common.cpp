@@ -250,6 +250,7 @@ expresslrs_mod_settings_s *ExpressLRS_currAirRate_Modparams = nullptr;
 expresslrs_rf_pref_params_s *ExpressLRS_currAirRate_RFperfParams = nullptr;
 
 // Current state of channels, CRSF format
+#if !defined(EML_BRIDGE)
 uint32_t ChannelData[CRSF_NUM_CHANNELS];
 
 /***
@@ -260,6 +261,7 @@ void ChannelDataReset()
     for (auto &ch : ChannelData)
         ch = CRSF_CHANNEL_VALUE_UNSET;
 }
+#endif
 
 uint8_t ICACHE_RAM_ATTR TLMratioEnumToValue(expresslrs_tlm_ratio_e const enumval)
 {

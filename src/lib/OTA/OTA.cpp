@@ -14,6 +14,7 @@ static_assert(sizeof(OTA_Packet8_s) == OTA8_PACKET_SIZE, "OTA8 packet struct is 
 static_assert(sizeof(OTA_Packet_s) == OTA_MAX_PACKET_SIZE, "OTA packet buffer is invalid!");
 
 uint8_t UID[UID_LEN] {};  // "bind phrase" ID
+#if !defined(EML_BRIDGE)
 elrsLinkStatistics_t linkStats {};
 bool isArmed = false;       // global arming status for other functions
 bool OtaIsFullRes;
@@ -31,7 +32,9 @@ template class EmlTransport<AP_MAX_BUF_LEN>;
 static Crc2Byte ota_crc;
 ValidatePacketCrc_t OtaValidatePacketCrc;
 GeneratePacketCrc_t OtaGeneratePacketCrc;
+#endif
 
+#if !defined(EML_BRIDGE)
 void OtaUpdateCrcInitFromUid()
 {
 #if OTA_VERSION_ID > 15
@@ -44,6 +47,7 @@ void OtaUpdateCrcInitFromUid()
     // xor-ing in the nonce in the GenerateCRC and ValidateCRC function
     OtaCrcInitializer ^= (uint16_t)OTA_VERSION_ID << 8;
 }
+#endif
 
 uint32_t OtaGetUidSeed()
 {
@@ -56,6 +60,7 @@ bool OtaUidIsBound(const uint8_t uid[UID_LEN])
     return (uid[2] != 0 || uid[3] != 0 || uid[4] != 0 || uid[5] != 0);
 }
 
+#if !defined(EML_BRIDGE)
 static inline uint8_t ICACHE_RAM_ATTR HybridWideNonceToSwitchIndex(uint8_t const nonce)
 {
     // Returns the sequence (0 to 7, then 0 to 7 rotated left by 1):
@@ -606,3 +611,4 @@ void OtaUpdateSerializers(OtaSwitchMode_e const switchMode, uint8_t packetSize)
 
     OtaSwitchModeCurrent = switchMode;
 }
+#endif // !EML_BRIDGE: RC serialization and legacy OTA CRC

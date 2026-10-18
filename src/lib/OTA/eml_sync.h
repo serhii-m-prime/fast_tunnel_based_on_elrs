@@ -19,7 +19,7 @@ enum EmlSyncPhase_e : uint8_t
 enum EmlPhyProfile_e : uint8_t
 {
     EML_PHY_LORA_500_SF6_CR45 = 1U,
-    EML_PHY_FSK_250 = 2U // protocol ID only; requires future SX127x FSK implementation
+    EML_PHY_FSK_250 = 2U
 };
 
 // Logical representation only. Every multi-byte wire field is explicitly BE.

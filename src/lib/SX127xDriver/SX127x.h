@@ -35,6 +35,13 @@ public:
     // Switches the modem through Sleep; Config() switches back to LoRa.
     bool ConfigFsk(const SX127xFskParams_s &params, uint32_t freq, uint8_t payloadLength);
     bool IsFsk() const { return ModFSKorLoRa == SX127x_OPMODE_FSK_OOK; }
+#if defined(EML_BRIDGE)
+    // Destructive startup probe: leaves the FSK register page in Standby.
+    // Reconfigure the selected PHY afterwards. Never enables the PA.
+    bool ProbePll(uint32_t freq, uint32_t timeoutUs = 5000);
+    // Negative LoRa lock indication, after Config(): RX only, then Standby.
+    bool ProbeLoraPll(uint32_t freq);
+#endif
     volatile uint32_t FskFifoOverruns = 0;
 #endif
     void SetMode(SX127x_RadioOPmodes mode, SX12XX_Radio_Number_t radioNumber);

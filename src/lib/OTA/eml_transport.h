@@ -3,6 +3,7 @@
 
 #include "eml_queue.h"
 #include "eml_sync.h"
+#include "eml_control.h"
 
 enum EmlRole_e : uint8_t { EML_COORDINATOR = 0, EML_RESPONDER = 1 };
 enum EmlSessionState_e : uint8_t
@@ -253,7 +254,8 @@ public:
         if (rx_.free() < 4U * maximum || rx_.size() * 2U >= QueueCapacity) return EML_FLOW_CTRL_HIGH_WATER;
         return EML_FLOW_CTRL_NORMAL;
     }
-    bool prepare(uint32_t slot, uint16_t hop, uint8_t *out, size_t capacity, EmlTxTicket_s *ticket)
+    bool prepare(uint32_t slot, uint16_t hop, uint8_t *out, size_t capacity, EmlTxTicket_s *ticket,
+                 const EmlBandMessage_s *control = nullptr)
     {
         tick(slot);
         if (!configured_ || !out || !ticket || capacity < config_.frame_size ||
@@ -273,6 +275,17 @@ public:
                 phase == EML_SYNC_HELLO ? 0U : config_.role == EML_COORDINATOR ? candidateRx_ : candidateTx_,
                 config_.configuration_id, (uint16_t)slot, hop};
             if (emlSyncEncode(&s, out + 2, capacity - 2) != EML_SYNC_OK) return false;
+            header = {EML_PKT_TYPE_SYNC, 7, 7, EML_SYNC_PAYLOAD_SIZE, EML_FLOW_CTRL_PAUSE};
+        }
+        else if (control && emlBandMessageValid(*control) && (control->op & 1U) == config_.role)
+        {
+            phase = control->op;
+            emlBandMessageWrite(*control, out + 2);
+            emlSyncWrite32(out + 6, config_.local_id);
+            emlSyncWrite32(out + 10, config_.peer_id);
+            emlSyncWrite32(out + 14, config_.role == EML_COORDINATOR ? txEpoch_ : rxEpoch_);
+            emlSyncWrite32(out + 18, config_.role == EML_COORDINATOR ? rxEpoch_ : txEpoch_);
+            emlSyncWrite32(out + 22, config_.configuration_id);
             header = {EML_PKT_TYPE_SYNC, 7, 7, EML_SYNC_PAYLOAD_SIZE, EML_FLOW_CTRL_PAUSE};
         }
         else if (!quiet(slot) && (pending_ || (tx_.size() && peerFlow_ != EML_FLOW_CTRL_PAUSE)))
@@ -303,7 +316,7 @@ public:
     {
         if (!canSend(ticket, slot)) return false;
         ++stats_.transmitted;
-        if (ticket.type == EML_PKT_TYPE_SYNC)
+        if (ticket.type == EML_PKT_TYPE_SYNC && ticket.phase <= EML_SYNC_READY)
         {
             syncSent_ = true; lastSyncSent_ = slot; readyReply_ = false;
             phasesSent_ |= (uint8_t)(1U << ticket.phase);
@@ -329,6 +342,19 @@ public:
         if (emlFrameDecode(bytes, length, config_.frame_size, &frame) != EML_FRAME_OK) return reject();
         if (frame.header.pkt_type == EML_PKT_TYPE_SYNC)
         {
+            if (frame.header.payload_len == EML_SYNC_PAYLOAD_SIZE && frame.payload[1] >= EML_BAND_PROPOSE)
+            {
+                EmlBandMessage_s m;
+                const uint8_t *p = frame.payload;
+                if (!active() || quiet(now) || frame.header.seq_num != 7 || frame.header.ack_num != 7 ||
+                    frame.header.flow_ctrl != EML_FLOW_CTRL_PAUSE || !emlBandMessageRead(p, frame.header.payload_len, &m) ||
+                    (m.op & 1U) == config_.role || emlSyncRead32(p + 4) != config_.peer_id ||
+                    emlSyncRead32(p + 8) != config_.local_id || emlSyncRead32(p + 20) != config_.configuration_id ||
+                    emlSyncRead32(p + 12) != (config_.role == EML_COORDINATOR ? rxEpoch_ : txEpoch_) ||
+                    emlSyncRead32(p + 16) != (config_.role == EML_COORDINATOR ? txEpoch_ : rxEpoch_)) return reject();
+                lastRxSlot_ = context.slot; haveRxSlot_ = true; lastGood_ = now; ++stats_.received;
+                return EML_RX_CONTROL;
+            }
             const uint32_t generationBefore = generation_;
             const EmlReceiveResult_e result = sync(frame, context, now);
             if (result == EML_RX_CONTROL && generationBefore == generation_)

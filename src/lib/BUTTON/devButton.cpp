@@ -83,12 +83,12 @@ static int start()
 
 static int event()
 {
-#if defined(TARGET_TX)
+#if defined(TARGET_TX) && !defined(EML_BRIDGE)
     if (isArmed)
     {
         return DURATION_NEVER;
     }
-#else
+#elif defined(TARGET_RX)
     if (connectionState == connected)
     {
         return DURATION_NEVER;

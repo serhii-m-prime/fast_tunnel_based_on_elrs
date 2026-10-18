@@ -36,6 +36,7 @@ struct EmlMacStats_s
 {
     uint32_t tx_frames, tx_no_frame, tx_overrun, rx_frames, rx_dropped;
     uint32_t acquisitions, lock_losses, late_prepares, sent_unmatched, missed_boundaries;
+    uint32_t band_handovers, emergency_searches;
 };
 const EmlMacStats_s &emlBridgeMacStats();
 
@@ -43,6 +44,7 @@ const EmlMacStats_s &emlBridgeMacStats();
 struct EmlLinkStats_s
 {
     uint8_t phy_profile;  // EmlPhyProfile_e in use
+    uint8_t band, pll_band_mask;
     uint8_t lq;           // % of expected peer frames received intact
     uint8_t per;          // 100 - lq
     int8_t rssi;          // dBm, averaged

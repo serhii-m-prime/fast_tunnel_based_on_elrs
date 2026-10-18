@@ -1,6 +1,7 @@
 #include "FHSS.h"
 #include "logging.h"
 #include "options.h"
+#include "eml_fhss.h"
 #include <string.h>
 
 #if defined(UNIT_TEST)
@@ -60,6 +61,12 @@ const fhss_config_t domains[] = {
 // Our table of FHSS frequencies. Define a regulatory domain to select the correct set for your location and radio
 const fhss_config_t *FHSSconfig;
 
+#if defined(EML_BRIDGE)
+// Kept outside the stock regulatory-domain indices; only EML uses this grid.
+static const fhss_config_t bridgeDomain = {"EML4B", emlBandStartReg(0),
+    emlBandChannelReg(0, EML_CHANNEL_COUNT - 1), EML_CHANNEL_COUNT, 970000000UL};
+#endif
+
 // Actual sequence of hops as indexes into the frequency list
 uint8_t FHSSsequence[FHSS_SEQUENCE_LEN];
 
@@ -99,7 +106,11 @@ void FHSSrandomiseFHSSsequence(const uint32_t seed)
     // the hop pointer indexes sequences that are about to be replaced
     FHSSptr = 0;
 
+#if defined(EML_BRIDGE)
+    FHSSconfig = &bridgeDomain;
+#else
     FHSSconfig = &domains[firmwareOptions.domain];
+#endif
     sync_channel = FHSSconfig->freq_count / 2;
     freq_spread = (FHSSconfig->freq_stop - FHSSconfig->freq_start) * FREQ_SPREAD_SCALE / (FHSSconfig->freq_count - 1);
 
@@ -138,6 +149,7 @@ Approach:
 */
 uint16_t FHSSrandomiseFHSSsequenceBuild(const uint32_t seed, uint32_t freqCount, uint_fast8_t syncChannel, uint8_t *inSequence)
 {
+    if (!inSequence || freqCount < 2 || freqCount > 256 || syncChannel >= freqCount) return 0;
     const uint16_t sequenceCount = (FHSS_SEQUENCE_LEN / freqCount) * freqCount;
 
     rngSeed(seed);

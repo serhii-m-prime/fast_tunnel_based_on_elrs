@@ -7,6 +7,7 @@
 #include "FHSS.h"
 #include "hwTimer.h"
 #include "logging.h"
+#include "eml_band.h"
 #if defined(PLATFORM_ESP32)
 #include <esp_system.h>
 #endif
@@ -87,13 +88,16 @@ static EmlUartStats_s uartStats;
 static EmlMacStats_s macStats;
 
 static EmlPhyPlan_s phyPlan;
-static EmlPhySelector phySelector;
+static EmlBandSearch bandSearch;
+static EmlBandController bandController;
+static uint8_t pllMasks[EML_PHY_MAX] = {};
 static const EmlMacProfile_s *profile = &kPhyOrder[0];
 static EmlFhssRecord_s fhssRecord;
 static EmlLinkQuality linkQuality;
 static int16_t rssiAvgX16 = 0;
-static bool coordinatorWasActive = false;
-static bool lockLost = false;
+static uint32_t lastValidMs = 0;
+static uint8_t missedAckCount = 0, watchedSequence = 0;
+static bool wasActive = false;
 
 static EmlMailbox rxMailbox;          // radio ISR -> foreground
 static EmlMailbox txMailbox;          // foreground -> timer ISR
@@ -128,10 +132,15 @@ static EmlArmedRx_s armed;                 // ISR owned (timer + DIO ISRs do not
 static EmlRadioDescriptor_s isrTx[2];      // timer ISR scratch for TX descriptors
 
 // FHSS copies in DRAM: the ISRs never touch the const domain table
-static uint32_t freqStart = 0;
+static volatile uint32_t freqStart = 0;
 static uint32_t freqSpread = 0;
-static uint32_t syncFreq = 0;
+static volatile uint32_t syncFreq = 0;
 static uint16_t hopCount = 1;
+static volatile uint8_t macBand = 0;
+static volatile bool bandSwitchArmed = false;
+static volatile uint32_t bandSwitchSlot = 0, bandSwitchStart = 0, bandSwitchSync = 0;
+static volatile uint8_t bandSwitchTarget = 0;
+static uint8_t foregroundBand = 0;
 
 // Foreground only
 static uint32_t prepSlot = 0xFFFFFFFFUL;
@@ -250,6 +259,16 @@ static void ICACHE_RAM_ATTR emlTimerTock()
     const uint32_t slot = slotClock.slot;
     const uint16_t hop = slotClock.hop;
 
+    if (bandSwitchArmed && !(slot & 1U) && (int32_t)(slot - bandSwitchSlot) >= 0)
+    {
+        // DRAM-only O(1) transition; the same channel permutation/hop continues.
+        freqStart = bandSwitchStart;
+        syncFreq = bandSwitchSync;
+        macBand = bandSwitchTarget;
+        bandSwitchArmed = false;
+        armed.valid = false;
+    }
+
     if (onTime && !macSuspended && macMode == MAC_LOCKED)
     {
         if (txActive)
@@ -352,7 +371,10 @@ static void prepareFor(uint32_t slot, uint16_t hop)
 {
     alignas(4) uint8_t frame[EML_FRAME_SIZE_64];
     EmlTxTicket_s ticket;
-    const bool ready = transport.prepare(slot, hop, frame, sizeof(frame), &ticket);
+    EmlBandMessage_s command;
+    const uint8_t missedAck = transport.pending() ? missedAckCount : 0;
+    const bool control = transport.active() && bandController.command(slot, linkQuality.lq(), linkQuality.samples(), missedAck, &command);
+    const bool ready = transport.prepare(slot, hop, frame, sizeof(frame), &ticket, control ? &command : nullptr);
     publishGeneration();
     if (!ready)
         return;
@@ -376,7 +398,6 @@ static void enterSearch(uint32_t now, bool countLoss)
     if (countLoss)
     {
         ++macStats.lock_losses;
-        lockLost = true;
         DBGLN("EML: lost coordinator, searching");
     }
 }
@@ -439,6 +460,7 @@ static void acquire(const EmlRadioDescriptor_s &d)
     while ((int32_t)(a.first_boundary_us - resumeLeadUs - micros()) > 0) {}
     hwTimer::resume();
     ++macStats.acquisitions;
+    lastValidMs = millis();
     DBGLN("EML: locked phy=%u slot=%u hop=%u", profile->phy_profile, a.first_slot, a.clock_hop);
 }
 
@@ -462,10 +484,11 @@ static void handleRx(const EmlRadioDescriptor_s &d, uint32_t now)
     if (macMode != MAC_LOCKED)
         return;
 
-    EmlFrameView_s view;
-    if (emlFrameDecode(d.bytes, d.length, kFrameSize, &view) == EML_FRAME_OK)
+    const EmlReceiveResult_e result = transport.receive(d.bytes, d.length, d.context, now);
+    if (result != EML_RX_REJECTED && result != EML_RX_STALE)
     {
-        // Link quality and RSSI count every intact peer frame, whatever the session state
+        // Only session/configuration/freshness-validated frames supervise the link.
+        lastValidMs = millis();
         linkQuality.received(d.context.slot >> 1);
         rssiAvgX16 = (int16_t)(rssiAvgX16 + ((int16_t)(d.rssi * 16) - rssiAvgX16) / 8);
         if (kRole == EML_RESPONDER)
@@ -473,8 +496,16 @@ static void handleRx(const EmlRadioDescriptor_s &d, uint32_t now)
             lastHeardSlot = d.context.slot;
             trackPhase(d);
         }
+        if (result == EML_RX_CONTROL && transport.active())
+        {
+            EmlFrameView_s view;
+            EmlBandMessage_s command;
+            if (emlFrameDecode(d.bytes, d.length, kFrameSize, &view) == EML_FRAME_OK &&
+                view.header.pkt_type == EML_PKT_TYPE_SYNC &&
+                emlBandMessageRead(view.payload, view.header.payload_len, &command))
+                bandController.receive(command, d.context.slot, lastValidMs);
+        }
     }
-    transport.receive(d.bytes, d.length, d.context, now);
     publishGeneration();
     peerProcessedSlot = d.context.slot;
 }
@@ -493,11 +524,11 @@ static void updateConnectionState()
     }
 }
 
-// Configure the radio, transport and timer for phySelector.profile(). The slot clock and
+// Configure the radio, transport and timer for the search tuple. The slot clock and
 // generation counting continue across PHY changes; the transport restarts its search.
 static bool applyPhy()
 {
-    profile = &phySelector.profile();
+    profile = &phyPlan.profiles[bandSearch.phy()];
     EML_CRITICAL_ENTER();
     macMode = MAC_OFF;
     armed.valid = false;
@@ -505,6 +536,11 @@ static bool applyPhy()
     EML_CRITICAL_EXIT();
     hwTimer::stop();
     Radio.SetTxIdleMode();
+    foregroundBand = macBand = bandSearch.band();
+    freqStart = emlBandStartReg(macBand);
+    freqSpread = EML_CHANNEL_STEP_REG * FREQ_SPREAD_SCALE;
+    syncFreq = emlBandChannelReg(macBand, EML_SYNC_CHANNEL);
+    bandSwitchArmed = false;
 
     bool ok;
 #if defined(SX127X_FSK_SUPPORT)
@@ -526,7 +562,7 @@ static bool applyPhy()
     ok = ok && Radio.PayloadLength == kFrameSize;
 
     slotUs = profile->slot_us;
-    transportConfig = emlMacTransportConfig(kRole, emlDeriveLinkIds(UID, *profile, fhssRecord), *profile, hopCount);
+    transportConfig = emlMacTransportConfig(kRole, emlDeriveLinkIds(UID, *profile, fhssRecord, true), *profile, hopCount);
     researchSlots = (uint16_t)(transportConfig.link_timeout_slots + 4U);
     const uint32_t now = emlNextOwnSlot(slotClock.slot, kRole);
     ok = ok && transport.begin(transportConfig, freshEpochSeed(), now);
@@ -543,7 +579,10 @@ static bool applyPhy()
     hwTimer::updateInterval(profile->slot_us);
     prepSlot = peerProcessedSlot = 0xFFFFFFFFUL;
     linkQuality.reset((slotClock.slot + 1U) >> 1);
-    coordinatorWasActive = false;
+    bandController.begin(kRole, macBand, bandSearch.mask(), millis());
+    wasActive = false;
+    lastValidMs = millis();
+    missedAckCount = watchedSequence = 0;
     if (kRole == EML_COORDINATOR)
     {
         publishBoundary(slotClock.slot, slotClock.hop, micros());
@@ -566,7 +605,39 @@ void emlBridgeBegin()
     fhssRecord = {FHSSconfig->freq_start, FHSSconfig->freq_stop, FHSSconfig->freq_count, OtaGetUidSeed(), hopCount};
 
     phyPlan = emlPhyPlan(kPhyOrder, (uint8_t)(sizeof(kPhyOrder) / sizeof(kPhyOrder[0])), FHSSconfig->freq_count);
-    phySelector.begin(phyPlan, kRole, millis());
+    // Positive PLL test on the FSK page at cell edges and the two extreme
+    // channel centres, repeated to reject intermittent lock. No RF TX occurs.
+    uint8_t positiveMask = 0;
+    for (uint8_t band = 0; band < EML_BAND_COUNT; ++band)
+    {
+        const uint32_t probes[] = {emlSx1276Frf(emlBandEdgeHz(band)), emlBandStartReg(band),
+            emlBandChannelReg(band, EML_CHANNEL_COUNT - 1), emlSx1276Frf(emlBandEndHz(band))};
+        bool ok = true;
+        for (uint8_t repeat = 0; repeat < 3 && ok; ++repeat)
+            for (uint32_t frequency : probes) if (!Radio.ProbePll(frequency)) { ok = false; break; }
+        if (ok) positiveMask |= (uint8_t)(1U << band);
+    }
+    for (uint8_t p = 0; p < phyPlan.count; ++p)
+    {
+        pllMasks[p] = positiveMask;
+        if (!emlIsFsk(phyPlan.profiles[p]))
+        {
+            for (uint8_t band = 0; band < EML_BAND_COUNT; ++band)
+            {
+                if (!(positiveMask & (1U << band))) continue;
+                Radio.Config(SX127x_BW_500_00_KHZ, SX127x_SF_6, SX127x_CR_4_5, emlBandStartReg(band),
+                             kLoraProfile.preamble, (UID[5] & 1U), kFrameSize);
+                if (!Radio.ProbeLoraPll(emlSx1276Frf(emlBandEdgeHz(band))) ||
+                    !Radio.ProbeLoraPll(emlSx1276Frf(emlBandEndHz(band)))) pllMasks[p] &= (uint8_t)~(1U << band);
+            }
+        }
+    }
+    if (!bandSearch.begin(phyPlan, kRole, pllMasks, millis()))
+    {
+        macMode = MAC_OFF;
+        setConnectionState(radioFailed); // normal Wi-Fi recovery/bootloader remains available
+        return;
+    }
 
     Radio.RXdoneCallback = &emlRxDone;
     Radio.TXdoneCallback = &emlTxDone;
@@ -577,25 +648,65 @@ void emlBridgeBegin()
     applyPhy();
 }
 
-// P5.5: cycle PHYs while unlinked, return to the preferred PHY after a loss
+// P6: coordinated band transitions preserve transport state. Emergency discovery
+// is a new session, with the same explicit RAM discard contract as a reconnect.
 static void updatePhy()
 {
-    bool change;
-    if (kRole == EML_COORDINATOR)
+    const uint32_t nowMs = millis();
+    if (foregroundBand != macBand)
     {
-        const bool active = transport.active();
-        const bool lost = coordinatorWasActive && !active;
-        coordinatorWasActive = active;
-        change = phySelector.update(millis(), active, transport.state() == EML_HELLO, lost);
+        foregroundBand = macBand;
+        bandController.completed(foregroundBand, nowMs);
+        linkQuality.reset((boundarySlot + 1U) >> 1);
+        lastValidMs = nowMs;
     }
-    else
+    const bool active = transport.active();
+    const EmlBoundary_s b = readBoundary();
+    if (active && !wasActive)
     {
-        const bool lost = lockLost;
-        lockLost = false;
-        change = phySelector.update(millis(), macMode == MAC_LOCKED, macMode == MAC_SEARCH, lost);
+        lastValidMs = nowMs;
+        missedAckCount = 0;
+        watchedSequence = transport.nextTxSequence();
     }
-    if (change)
+    // A stalled foreground may miss the last opportunity to publish the switch
+    // to the ISR. Do not leave an armed negotiation stuck forever on the old band.
+    const bool missedHandover = bandController.armed() && bandController.target() != macBand &&
+        !bandSwitchArmed && (int32_t)(b.slot - bandController.switchSlot()) >= 0;
+    const bool emergency = missedHandover || (active && nowMs - lastValidMs >= EML_EMERGENCY_MS) || (wasActive && !active);
+    wasActive = active;
+    if (emergency)
+    {
+        ++macStats.emergency_searches;
+        bandSearch.begin(phyPlan, kRole, pllMasks, nowMs);
         applyPhy();
+        return;
+    }
+    if (!active)
+    {
+        const bool held = kRole == EML_COORDINATOR ? transport.state() != EML_HELLO : macMode == MAC_LOCKED;
+        if (bandSearch.update(nowMs, held)) applyPhy();
+        return;
+    }
+    if (!transport.pending() || watchedSequence != transport.nextTxSequence())
+    { missedAckCount = 0; watchedSequence = transport.nextTxSequence(); }
+    bandController.consider(b.slot, nowMs, linkQuality.lq(), linkQuality.samples(),
+                            transport.pending() ? missedAckCount : 0);
+    if (bandController.armed() && !bandSwitchArmed && bandController.target() != macBand)
+    {
+        const uint8_t target = bandController.target();
+        const uint32_t start = emlBandStartReg(target), sync = emlBandChannelReg(target, EML_SYNC_CHANNEL);
+        EML_CRITICAL_ENTER();
+        if ((int32_t)(bandController.switchSlot() - boundarySlot) > 0)
+        {
+            bandSwitchSlot = bandController.switchSlot();
+            bandSwitchTarget = target;
+            bandSwitchStart = start;
+            bandSwitchSync = sync;
+            bandSwitchArmed = true;
+            ++macStats.band_handovers;
+        }
+        EML_CRITICAL_EXIT();
+    }
 }
 
 void emlBridgeLoop()
@@ -612,6 +723,10 @@ void emlBridgeLoop()
     {
         if (!transport.sent(ticket, ticket.slot))
             ++macStats.sent_unmatched;
+        else if (ticket.type == EML_PKT_TYPE_SYNC && ticket.phase >= EML_BAND_PROPOSE)
+            bandController.sent(ticket.phase);
+        else if (ticket.type == EML_PKT_TYPE_DATA && missedAckCount < 255)
+            ++missedAckCount;
     }
 
     // 2. Received frames (acquisition can reload the clock)
@@ -638,6 +753,8 @@ void emlBridgeLoop()
     updatePhy();
     if (macMode == MAC_OFF)
         return;
+    b = readBoundary();
+    now = emlNextOwnSlot(b.slot, kRole);
 
     // 4. Prepare the next own slot: early (stale ACK, covers a lost peer frame) and
     //    once more after the peer frame of the preceding slot was processed
@@ -688,6 +805,8 @@ EmlLinkStats_s emlBridgeLinkStats()
 {
     EmlLinkStats_s stats;
     stats.phy_profile = profile->phy_profile;
+    stats.band = macBand;
+    stats.pll_band_mask = bandSearch.mask();
     stats.lq = linkQuality.lq();
     stats.per = (uint8_t)(linkQuality.samples() ? 100U - stats.lq : 0U);
     stats.rssi = (int8_t)(rssiAvgX16 / 16);

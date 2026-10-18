@@ -2,6 +2,7 @@
 #define H_EML_MAC
 
 #include "eml_transport.h"
+#include "eml_fhss.h"
 
 /**
  * EML bridge MAC: PHY profiles, LoRa time-on-air, slot budget, the shared
@@ -40,6 +41,9 @@
 #define EML_PREP_MARGIN_US     400U
 // Minimum lead between acquisition processing and the first locked boundary.
 #define EML_LOCK_LEAD_US       600U
+// P6: reserve the full 500 us turnaround bound for wider FHSS/band changes.
+// This is a capacity bound, separate from the nominal RX timestamp estimate.
+#define EML_TURNAROUND_US      500U
 
 // Session timing in milliseconds; converted to slots per profile.
 #define EML_HANDSHAKE_TIMEOUT_MS 700U
@@ -76,25 +80,25 @@ struct EmlMacProfile_s
 
 // P4.2: LoRa BW500 / SF6 / CR4/5, implicit header, hardware CRC off (EML CRC16 instead)
 constexpr EmlMacProfile_s EML_PROFILE_LORA64 = {EML_PHY_LORA_500_SF6_CR45, EML_FRAME_SIZE_64, 8, 6, 5, 500000UL,
-                                                0, 0, 0, 0, false, EML_TX_START_US, EML_RX_DONE_US, 17500UL};
+                                                0, 0, 0, 0, false, EML_TX_START_US, EML_RX_DONE_US, 17800UL};
 constexpr EmlMacProfile_s EML_PROFILE_LORA32 = {EML_PHY_LORA_500_SF6_CR45, EML_FRAME_SIZE_32, 8, 6, 5, 500000UL,
-                                                0, 0, 0, 0, false, EML_TX_START_US, EML_RX_DONE_US, 10400UL};
+                                                0, 0, 0, 0, false, EML_TX_START_US, EML_RX_DONE_US, 10600UL};
 // P5.2: GFSK 250 kbit/s, BT 1.0, Fdev 90 kHz (h = 0.72), RxBw = AfcBw = 250 kHz SSB.
 // Fdev + BR/2 = 215 kHz <= 250 kHz filter leaves +-35 kHz for crystal offset before AFC;
 // preamble 10 B (320 us) covers detection (2 B), AFC/AGC and responder alignment.
 constexpr EmlMacProfile_s EML_PROFILE_FSK64 = {EML_PHY_FSK_250, EML_FRAME_SIZE_64, 10, 0, 0, 0,
                                                250000UL, 90000UL, 250000UL, EML_FSK_SHAPING_BT_1_0, false,
-                                               EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 3800UL};
+                                               EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 4100UL};
 constexpr EmlMacProfile_s EML_PROFILE_FSK32 = {EML_PHY_FSK_250, EML_FRAME_SIZE_32, 10, 0, 0, 0,
                                                250000UL, 90000UL, 250000UL, EML_FSK_SHAPING_BT_1_0, false,
-                                               EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 2800UL};
+                                               EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 3100UL};
 // P5.7 experiment: 300 kbit/s is the SX1276 FSK maximum. h = 0.5 needs Fdev >= 75 kHz,
 // leaving only +-25 kHz offset margin in the 250 kHz filter. It shares the FSK wire PHY
 // ID, but it is a different configuration record (different configuration_id) and is
 // a build-time opt-in only.
 constexpr EmlMacProfile_s EML_PROFILE_FSK64_300K = {EML_PHY_FSK_250, EML_FRAME_SIZE_64, 10, 0, 0, 0,
                                                     300000UL, 75000UL, 250000UL, EML_FSK_SHAPING_BT_1_0, true,
-                                                    EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 3500UL};
+                                                    EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 3700UL};
 
 // ---- LoRa time on air (Semtech SX1276 datasheet §4.1.1.7 / AN1200.13) ----------------
 constexpr uint32_t emlCeilDivPositive(int32_t a, int32_t b) { return a <= 0 ? 0U : (uint32_t)((a + b - 1) / b); }
@@ -133,8 +137,12 @@ constexpr uint32_t emlProfileToaUs(const EmlMacProfile_s &p)
 // Expected RX timestamp relative to the sender's slot boundary
 constexpr uint32_t emlRxOffsetUs(const EmlMacProfile_s &p) { return p.tx_start_us + emlProfileToaUs(p) + p.rx_done_us; }
 
-// Smallest slot that fits TX start + ToA + RX completion + processing + guard
-constexpr uint32_t emlMinSlotUs(const EmlMacProfile_s &p) { return emlRxOffsetUs(p) + EML_PROC_US + EML_GUARD_US; }
+// Strict capacity bound: synth/turnaround + ToA + RX IRQ/FIFO + processing + guard.
+constexpr uint32_t emlMinSlotUs(const EmlMacProfile_s &p)
+{
+    return emlProfileToaUs(p) + (p.tx_start_us > EML_TURNAROUND_US ? p.tx_start_us : EML_TURNAROUND_US) +
+        p.rx_done_us + EML_PROC_US + EML_GUARD_US;
+}
 
 // How late the responder may open RX after the coordinator boundary and still catch the
 // frame: LoRa needs the last ~3 preamble symbols, FSK the 2-byte detector plus ~2 bytes
@@ -159,7 +167,7 @@ constexpr bool emlFskWithinDatasheet(const EmlMacProfile_s &p)
 constexpr bool emlProfileValid(const EmlMacProfile_s &p)
 {
     return (p.frame_size == EML_FRAME_SIZE_32 || p.frame_size == EML_FRAME_SIZE_64) &&
-        p.slot_us >= emlMinSlotUs(p) &&
+        p.slot_us > emlMinSlotUs(p) &&
         // responder bias must keep its TX inside the coordinator's odd slot
         EML_RESPONDER_BIAS_US < EML_GUARD_US &&
         (emlIsFsk(p) ? emlFskWithinDatasheet(p) && (p.bitrate == 250000UL || p.experimental)
@@ -313,7 +321,7 @@ inline EmlTransportConfig_s emlMacTransportConfig(EmlRole_e role, const EmlLinkI
  * differently bound pair never completes the handshake. configuration_id hashes the
  * exact record (PHY, N, slot, FHSS table inputs, timing); any change yields a new ID.
  */
-inline EmlLinkIds_s emlDeriveLinkIds(const uint8_t uid[6], const EmlMacProfile_s &p, const EmlFhssRecord_s &f)
+inline EmlLinkIds_s emlDeriveLinkIds(const uint8_t uid[6], const EmlMacProfile_s &p, const EmlFhssRecord_s &f, bool multiBand = false)
 {
     static const uint8_t tagT[4] = {'E', 'M', 'L', 'T'}, tagR[4] = {'E', 'M', 'L', 'R'};
     EmlLinkIds_s ids;
@@ -348,6 +356,18 @@ inline EmlLinkIds_s emlDeriveLinkIds(const uint8_t uid[6], const EmlMacProfile_s
     n = emlPutLe(record, n, p.tx_start_us, 2);
     n = emlPutLe(record, n, p.rx_done_us, 2);
     ids.configuration = emlFnv1a(uid, 6, emlFnv1a(record, n));
+    if (multiBand)
+    {
+        // Full plan is shared; the active band and per-die PLL exclusions are
+        // deliberately not configuration changes during a live session.
+        uint8_t bands[20];
+        size_t at = 0;
+        bands[at++] = 1; // multiband policy/wire version
+        bands[at++] = EML_CHANNEL_COUNT; bands[at++] = EML_SYNC_CHANNEL;
+        bands[at++] = 0xA5; // session-bound PROPOSE/ACK/COMMIT/STATUS extension
+        for (uint8_t b = 0; b < EML_BAND_COUNT; ++b) at = emlPutLe(bands, at, emlBandEdgeHz(b), 4);
+        ids.configuration = emlFnv1a(bands, at, ids.configuration);
+    }
     if (!ids.configuration) ids.configuration = 1;
     return ids;
 }

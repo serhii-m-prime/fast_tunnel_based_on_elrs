@@ -1,11 +1,52 @@
 #include "SX127x.h"
 #include "logging.h"
 #include "RFAMP_hal.h"
+#include "SX127xPll.h"
 
 SX127xHal hal;
+RFAMP_hal RFAMP;
 SX127xDriver *SX127xDriver::instance = NULL;
 
-RFAMP_hal RFAMP;
+#if defined(EML_BRIDGE) && defined(SX127X_FSK_SUPPORT)
+bool SX127xDriver::ProbePll(uint32_t freq, uint32_t timeoutUs)
+{
+  if (!timeoutUs || timeoutUs > 20000U) return false;
+  RFAMP.TXRXdisable();
+  SetMode(SX127x_OPMODE_SLEEP, SX12XX_Radio_All);
+  ModFSKorLoRa = SX127x_OPMODE_FSK_OOK;
+  hal.writeRegister(SX127X_REG_OP_MODE, ModFSKorLoRa | lowFrequencyMode, SX12XX_Radio_All);
+  currOpmode = SX127x_OPMODE_SLEEP;
+  InvalidateLoraCache();
+  SetFrequencyReg(freq, SX12XX_Radio_All);
+  auto flags = []() { return hal.readRegister(SX127X_FSK_REG_IRQ_FLAGS1, SX12XX_Radio_1); };
+  auto clock = []() { return (uint32_t)micros(); };
+  auto pause = []() { delayMicroseconds(20); };
+  // Require unlock in Standby: a stale asserted lock must never pass a new probe.
+  bool ok = sx127xWaitPll(flags, clock, pause, timeoutUs, false);
+  uint8_t frf[3];
+  hal.readRegister(SX127X_REG_FRF_MSB, frf, 3, SX12XX_Radio_1);
+  ok = ok && (((uint32_t)frf[0] << 16) | ((uint32_t)frf[1] << 8) | frf[2]) == freq;
+  if (ok)
+  {
+    SetMode(SX127x_OPMODE_FSRX, SX12XX_Radio_All);
+    ok = sx127xWaitPll(flags, clock, pause, timeoutUs, true);
+  }
+  SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All);
+  return ok;
+}
+
+bool SX127xDriver::ProbeLoraPll(uint32_t freq)
+{
+  if (ModFSKorLoRa != SX127x_OPMODE_LORA) return false;
+  RFAMP.TXRXdisable();
+  SetFrequencyReg(freq, SX12XX_Radio_All);
+  SetMode(SX127x_OPMODE_RXCONTINUOUS, SX12XX_Radio_All);
+  delayMicroseconds(1000); // exceeds specified synthesizer startup; no SPI in ISR here
+  const uint8_t status = hal.readRegister(0x1C, SX12XX_Radio_1); // RegHopChannel.PllTimeout
+  SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All);
+  return !(status & 0x80U); // negative indication only; positive FSK probe is also required
+}
+#endif
 
 const uint8_t SX127x_AllowedSyncwords[105] =
     {0, 5, 6, 7, 11, 12, 13, 15, 18,

@@ -44,7 +44,7 @@ void test_slot_budget()
         TEST_ASSERT_TRUE(emlProfileValid(p));
         const uint32_t toa = emlProfileToaUs(p);
         TEST_ASSERT_EQUAL_UINT32(p.tx_start_us + toa + p.rx_done_us, emlRxOffsetUs(p));
-        TEST_ASSERT_TRUE(p.slot_us >= emlMinSlotUs(p));
+        TEST_ASSERT_TRUE(p.slot_us > emlMinSlotUs(p));
         // The peer frame ends (with responder bias and guard) before the next own boundary
         TEST_ASSERT_TRUE(p.tx_start_us + toa + p.rx_done_us + EML_RESPONDER_BIAS_US + EML_PREP_MARGIN_US < p.slot_us);
         // A responder late by half the guard still opens RX inside the coordinator's preamble
@@ -56,10 +56,10 @@ void test_slot_budget()
     TEST_ASSERT_EQUAL_UINT32(250U + 5U * 128U, emlRxLateToleranceUs(EML_PROFILE_LORA64));
     TEST_ASSERT_EQUAL_UINT32(200U + 6U * 32U, emlRxLateToleranceUs(EML_PROFILE_FSK64));
     // Net payload per direction: one frame per slot pair
-    TEST_ASSERT_EQUAL_UINT32(1714, (uint32_t)(60ULL * 1000000ULL / (2ULL * EML_PROFILE_LORA64.slot_us)));
-    TEST_ASSERT_EQUAL_UINT32(1346, (uint32_t)(28ULL * 1000000ULL / (2ULL * EML_PROFILE_LORA32.slot_us)));
-    TEST_ASSERT_EQUAL_UINT32(7894, (uint32_t)(60ULL * 1000000ULL / (2ULL * EML_PROFILE_FSK64.slot_us)));
-    TEST_ASSERT_EQUAL_UINT32(5000, (uint32_t)(28ULL * 1000000ULL / (2ULL * EML_PROFILE_FSK32.slot_us)));
+    TEST_ASSERT_EQUAL_UINT32(1685, (uint32_t)(60ULL * 1000000ULL / (2ULL * EML_PROFILE_LORA64.slot_us)));
+    TEST_ASSERT_EQUAL_UINT32(1320, (uint32_t)(28ULL * 1000000ULL / (2ULL * EML_PROFILE_LORA32.slot_us)));
+    TEST_ASSERT_EQUAL_UINT32(7317, (uint32_t)(60ULL * 1000000ULL / (2ULL * EML_PROFILE_FSK64.slot_us)));
+    TEST_ASSERT_EQUAL_UINT32(4516, (uint32_t)(28ULL * 1000000ULL / (2ULL * EML_PROFILE_FSK32.slot_us)));
 }
 
 // ---- P5.2/P5.4/P5.7: FSK profiles ------------------------------------------------------
@@ -148,7 +148,7 @@ void test_fsk_sync_word_and_configuration_ids()
     const EmlTransportConfig_s c = emlMacTransportConfig(EML_COORDINATOR, emlDeriveLinkIds(uid, EML_PROFILE_FSK64, fhss), EML_PROFILE_FSK64, 240);
     TEST_ASSERT_TRUE(EmlTransport<1024>::validConfig(c));
     TEST_ASSERT_EQUAL_UINT8(EML_PHY_FSK_250, c.phy_profile);
-    TEST_ASSERT_EQUAL_UINT16(395, c.link_timeout_slots);
+    TEST_ASSERT_EQUAL_UINT16(366, c.link_timeout_slots);
 }
 
 // ---- P5.5: PHY selection and link quality -------------------------------------------------
@@ -157,12 +157,12 @@ void test_phy_plan_dwell()
 {
     const EmlMacProfile_s order[] = {EML_PROFILE_FSK64, EML_PROFILE_LORA64};
     const EmlPhyPlan_s plan = emlPhyPlan(order, 2, 40);
-    TEST_ASSERT_EQUAL_UINT32(304000, emlRendezvousPeriodUs(EML_PROFILE_FSK64, 40));
-    TEST_ASSERT_EQUAL_UINT32(1400000, emlRendezvousPeriodUs(EML_PROFILE_LORA64, 40));
-    TEST_ASSERT_EQUAL_UINT32(639, plan.coordinator_dwell_ms[0]);   // 2 x 304 ms + 8 slots
-    TEST_ASSERT_EQUAL_UINT32(2940, plan.coordinator_dwell_ms[1]);
-    TEST_ASSERT_EQUAL_UINT32(639 + 2940 + 639, plan.responder_dwell_ms[0]);
-    TEST_ASSERT_EQUAL_UINT32(639 + 2940 + 2940, plan.responder_dwell_ms[1]);
+    TEST_ASSERT_EQUAL_UINT32(328000, emlRendezvousPeriodUs(EML_PROFILE_FSK64, 40));
+    TEST_ASSERT_EQUAL_UINT32(1424000, emlRendezvousPeriodUs(EML_PROFILE_LORA64, 40));
+    TEST_ASSERT_EQUAL_UINT32(689, plan.coordinator_dwell_ms[0]);   // 2 x 328 ms + 8 slots
+    TEST_ASSERT_EQUAL_UINT32(2991, plan.coordinator_dwell_ms[1]);
+    TEST_ASSERT_EQUAL_UINT32(689 + 2991 + 689, plan.responder_dwell_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(689 + 2991 + 2991, plan.responder_dwell_ms[1]);
     const EmlPhyPlan_s single = emlPhyPlan(order, 1, 40);
     EmlPhySelector s;
     s.begin(single, EML_COORDINATOR, 0);
@@ -190,7 +190,7 @@ void test_phy_selector_rules()
     // millis() wrap
     c.begin(plan, EML_COORDINATOR, 0xFFFFFF00UL);
     TEST_ASSERT_FALSE(c.update(0x00000100UL, false, true, false));
-    TEST_ASSERT_TRUE(c.update(0xFFFFFF00UL + 639U, false, true, false));
+    TEST_ASSERT_TRUE(c.update((uint32_t)(0xFFFFFF00UL + 689U), false, true, false));
 }
 
 // Abstract timeline: each side cycles with its own phase; the pair locks at the first

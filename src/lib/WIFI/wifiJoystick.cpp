@@ -1,8 +1,8 @@
 #include "device.h"
 
-#include "wifiJoystick.h"
+#if defined(TARGET_TX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
 
-#if defined(TARGET_TX) && defined(PLATFORM_ESP32)
+#include "wifiJoystick.h"
 
 #include "handset.h"
 #include "crsf_protocol.h"

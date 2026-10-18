@@ -211,6 +211,13 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
     firmwareOptions.domain = doc["domain"] | 0;
     firmwareOptions.flash_discriminator = doc["flash-discriminator"] | 0U;
 
+#if defined(EML_BRIDGE)
+    // A saved stock options.json must not reactivate RC serial semantics in a
+    // firmware whose RC stack has been excluded at build time.
+    firmwareOptions.is_airport = true;
+    firmwareOptions.uart_baud = normalizeBridgeBaud(firmwareOptions.uart_baud);
+#endif
+
     builtinOptions.clear();
     saveOptions(builtinOptions, doc["customised"] | false);
 }

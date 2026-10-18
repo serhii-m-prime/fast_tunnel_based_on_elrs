@@ -35,11 +35,11 @@
 #include "options.h"
 #include "helpers.h"
 #include "devButton.h"
-#if defined(TARGET_RX)
+#if defined(TARGET_RX) && !defined(EML_BRIDGE)
 #include "devAnalogVbat.h"
 #include "VbatCalibration.h"
 #endif
-#if defined(TARGET_RX) && defined(PLATFORM_ESP32)
+#if defined(TARGET_RX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
 #include "devVTXSPI.h"
 #endif
 
@@ -52,7 +52,9 @@
 #endif
 
 #if defined(TARGET_TX)
+#if !defined(EML_BRIDGE)
 #include "wifiJoystick.h"
+#endif
 
 extern void setButtonColors(uint8_t b1, uint8_t b2);
 #endif
@@ -73,7 +75,7 @@ static IPAddress netMsk(255, 255, 255, 0);
 static DNSServer dnsServer;
 static IPAddress ipAddress;
 
-#if defined(TARGET_RX)
+#if defined(TARGET_RX) && !defined(EML_BRIDGE)
 #include "TcpMspConnector.h"
 TcpMspConnector wifi2tcp;
 #endif
@@ -315,7 +317,7 @@ static int8_t wifi_GetClientRssi()
   return 0;
 }
 
-#if defined(TARGET_RX)
+#if defined(TARGET_RX) && !defined(EML_BRIDGE)
 static uint8_t getDefinedVoltageSourceCount()
 {
     uint8_t count = 0;
@@ -389,7 +391,7 @@ static void SampleVoltageSources(AsyncWebServerRequest *request, JsonVariant &js
 }
 #endif
 
-#if defined(TARGET_RX)
+#if defined(TARGET_RX) && !defined(EML_BRIDGE)
 static void GetGpsStatus(AsyncWebServerRequest *request)
 {
   auto *response = new AsyncJsonResponse();
@@ -559,11 +561,15 @@ static void GetConfiguration(AsyncWebServerRequest *request)
     {
         settings["has_serial_pins"] = true;
     }
+#if defined(EML_BRIDGE)
+    settings["has_gps"] = false;
+#else
     settings["has_gps"] = config.GetSerialProtocol() == PROTOCOL_GPS
     #if defined(PLATFORM_ESP32)
         || config.GetSerial1Protocol() == PROTOCOL_SERIAL1_GPS
     #endif
         ;
+#endif
     #endif
     settings["product_name"] = product_name;
     settings["lua_name"] = device_name;
@@ -580,7 +586,11 @@ static void GetConfiguration(AsyncWebServerRequest *request)
 #endif
 #if defined(TARGET_RX)
     settings["module-type"] = "RX";
+#if defined(EML_BRIDGE)
+    settings["voltage_source_count"] = 0;
+#else
     settings["voltage_source_count"] = getDefinedVoltageSourceCount();
+#endif
 #endif
 #if defined(RADIO_SX127X)
     settings["radio-type"] = "SX127X";
@@ -927,7 +937,7 @@ static void WebUploadResponseHandler(AsyncWebServerRequest *request) {
 static void WebUploadDataHandler(AsyncWebServerRequest *request, const String& filename, size_t index, uint8_t *data, size_t len, bool final) {
   force_update = force_update || request->hasArg("force");
   if (index == 0) {
-    #if defined(TARGET_TX) && defined(PLATFORM_ESP32)
+    #if defined(TARGET_TX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
       WifiJoystick::StopJoystickService();
     #endif
 
@@ -996,7 +1006,7 @@ static void WebUploadForceUpdateHandler(AsyncWebServerRequest *request) {
   }
 }
 
-#if defined(TARGET_TX) && defined(PLATFORM_ESP32)
+#if defined(TARGET_TX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
 static void WebUdpControl(AsyncWebServerRequest *request)
 {
   const String &action = request->arg("action");
@@ -1125,7 +1135,7 @@ static void startWiFi(unsigned long now)
 
   if (connectionState < FAILURE_STATES) {
     hwTimer::stop();
-#if defined(TARGET_RX) && defined(PLATFORM_ESP32)
+#if defined(TARGET_RX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
     disableVTxSpi();
 #endif
 
@@ -1222,7 +1232,7 @@ static void startMDNS()
   #endif
   #endif
 
-  #if defined(TARGET_TX) && defined(PLATFORM_ESP32)
+  #if defined(TARGET_TX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
     MDNS.addService("elrs", "udp", JOYSTICK_PORT);
     MDNS.addServiceTxt("elrs", "udp", "device", (const char *)device_name);
     MDNS.addServiceTxt("elrs", "udp", "version", String(JOYSTICK_VERSION).c_str());
@@ -1302,16 +1312,16 @@ static void startServices()
   server.on("/options.json", HTTP_GET, getFile);
   server.on("/reboot", HandleReboot);
   server.on("/reset", HandleReset);
-  #if defined(TARGET_RX)
+  #if defined(TARGET_RX) && !defined(EML_BRIDGE)
     server.on("/gps", HTTP_GET, GetGpsStatus);
   #endif
-  #if defined(TARGET_TX) && defined(PLATFORM_ESP32)
+  #if defined(TARGET_TX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
     server.on("/udpcontrol", HTTP_POST, WebUdpControl);
   #endif
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/config", UpdateConfiguration));
   server.addHandler(new AsyncCallbackJsonWebHandler("/options.json", UpdateSettings));
-  #if defined(TARGET_RX)
+  #if defined(TARGET_RX) && !defined(EML_BRIDGE)
     server.addHandler(new AsyncCallbackJsonWebHandler("/voltage-sample", SampleVoltageSources));
   #endif
   #if defined(TARGET_TX)
@@ -1326,7 +1336,7 @@ static void startServices()
     addLR1121Handlers(server);
   #endif
 
-  #if defined(TARGET_RX)
+  #if defined(TARGET_RX) && !defined(EML_BRIDGE)
     wifi2tcp.begin();
     server.addHandler(wifi2tcp.getWSserver());
   #endif
@@ -1342,7 +1352,7 @@ static void startServices()
 
   startMDNS();
 
-  #if defined(TARGET_TX) && defined(PLATFORM_ESP32)
+  #if defined(TARGET_TX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
     WifiJoystick::StartJoystickService();
   #endif
 
@@ -1446,7 +1456,7 @@ static void HandleWebUpdate()
       MDNS.update();
     #endif
 
-    #if defined(TARGET_TX) && defined(PLATFORM_ESP32)
+    #if defined(TARGET_TX) && defined(PLATFORM_ESP32) && !defined(EML_BRIDGE)
       WifiJoystick::Loop(now);
     #endif
   }

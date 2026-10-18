@@ -29,6 +29,18 @@ LIBRARY_EXCLUSIONS = {
     }
 }
 
+# LDF's default mode also follows headers in inactive EML_BRIDGE branches. Ignore
+# their implementation libraries explicitly, instead of depending on link-time GC
+# to discard code after constructors/device registration have already retained it.
+BRIDGE_EXCLUSIONS = (
+    "ADC", "AnalogVbat", "Baro", "BLE", "Backpack", "CRSF2MSP", "CrsfProtocol",
+    "GSENSOR", "GYRO", "Handset", "MAVLink", "MSP", "MSPVTX", "POWER_DETECT",
+    "PWM", "SCREEN", "SerialUpdate", "ServoOutput", "StubbornReceiver",
+    "StubbornSender", "VTX", "VTXSPI", "rx-crsf", "tx-crsf",
+    "NimBLE-Arduino", "ESP32-BLE-Gamepad", "U8g2", "GFX Library for Arduino",
+    "c_library_v2",
+)
+
 
 import elrs_helpers
 
@@ -48,6 +60,9 @@ excluded_libraries = ()
 if target_type:
     mcu = env.BoardConfig().get("build.mcu", "").lower()
     excluded_libraries = get_excluded_libraries(target_type, mcu)
+    if any(token.split("=", 1)[0] == "-DEML_BRIDGE"
+           for flag in env.get("BUILD_FLAGS", []) for token in str(flag).split()):
+        excluded_libraries += BRIDGE_EXCLUSIONS
 
 if excluded_libraries:
     config = env.GetProjectConfig()

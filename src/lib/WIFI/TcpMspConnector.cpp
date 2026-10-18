@@ -1,4 +1,4 @@
-#if defined(TARGET_RX)
+#if defined(TARGET_RX) && !defined(EML_BRIDGE)
 
 #include "TcpMspConnector.h"
 #include "logging.h"
