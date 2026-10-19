@@ -356,9 +356,9 @@ typedef enum
 #define SX127X_FSK_RX_TRIGGER_PREAMBLE  0x06
 // RegRssiConfig: RssiSmoothing 32 samples
 #define SX127X_FSK_RSSI_SMOOTHING_32    0x04
-// RegRxBw / RegAfcBw DC-cancellation cutoff fields
-#define SX127X_FSK_RXBW_DCC_4_PERCENT   0x40
-#define SX127X_FSK_AFCBW_DCC_DEFAULT    0x80
+// RegRxBw/RegAfcBw use bits 4:0 only. Unlike SX1231, SX1276 has no DCC
+// field here: bits 6:5 / 7:5 are reserved and must retain their zero defaults.
+#define SX127X_FSK_RX_CONFIG_DEFAULT   (SX127X_FSK_AFC_AUTO_ON | SX127X_FSK_AGC_AUTO_ON | SX127X_FSK_RX_TRIGGER_PREAMBLE)
 // RegAfcFei
 #define SX127X_FSK_AFC_AUTO_CLEAR_ON    0x01
 // RegPreambleDetect: on, 2 bytes, 10 chip errors tolerated

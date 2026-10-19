@@ -13,6 +13,7 @@
 #include "eml_qos.h"
 #include "eml_role.h"
 #include "eml_mavlink_out.h"
+#include "eml_rx.h"
 #include "POWERMGNT.h"
 #include "options.h"
 #if defined(PLATFORM_ESP32)
@@ -164,16 +165,7 @@ static volatile uint16_t boundaryHop = 0;
 static volatile uint32_t boundaryUs = 0;
 static volatile bool txActive = false;
 
-struct EmlArmedRx_s
-{
-    EmlRxContext_s context;
-    uint32_t start_us;
-    uint8_t flags;
-    uint8_t length;
-    bool valid;
-    bool taken;
-};
-static EmlArmedRx_s armed;                 // ISR owned (timer + DIO ISRs do not nest)
+static EmlArmedRx_s armed;                 // ISR arms; foreground validates under EML_CRITICAL
 static EmlRadioDescriptor_s isrTx[2];      // timer ISR scratch for TX descriptors
 
 // FHSS copies in DRAM: the ISRs never touch the const domain table
@@ -270,7 +262,11 @@ static void ICACHE_RAM_ATTR ownBoundary(uint32_t slot, uint16_t hop, uint32_t no
     {
         tuneFor(hopFreq(hop), true);
         txActive = true;
-        Radio.TXnb(isrTx[found].bytes, false, nullptr, SX12XX_Radio_1);
+        if (!Radio.TXnb(isrTx[found].bytes, false, nullptr, SX12XX_Radio_1))
+        {
+            txActive = false;
+            return; // transport keeps the unsent payload/ticket for a subsequent slot
+        }
         if (FHSSsequence[hop] == sync_channel)
             ++macStats.tx_sync_channel;
         // Reported before the peer slot starts, i.e. before any RX that can ACK it
@@ -281,8 +277,7 @@ static void ICACHE_RAM_ATTR ownBoundary(uint32_t slot, uint16_t hop, uint32_t no
     {
         ++macStats.tx_no_frame;
         tuneFor(hopFreq(hop), false);
-        Radio.RXnb();
-        armRx(slot, hop, nowUs, 0);
+        if (Radio.RXnb()) armRx(slot, hop, nowUs, 0);
     }
 }
 
@@ -294,10 +289,10 @@ static void ICACHE_RAM_ATTR peerBoundary(uint32_t slot, uint16_t hop, uint32_t n
     }
     else
     {
+        armed.valid = false;
         Radio.SetPacketLength(physicalLength(slot));
         tuneFor(hopFreq(hop), false);
-        Radio.RXnb();
-        armRx(slot, hop, nowUs, 0);
+        if (Radio.RXnb()) armRx(slot, hop, nowUs, 0);
     }
 }
 
@@ -369,10 +364,10 @@ static void ICACHE_RAM_ATTR emlTxDone()
     emlClockAdvance(next);
     if (emlTddOwner(next.slot, macTddPlan) != runtimeRole)
     {
+        armed.valid = false;
         Radio.SetPacketLength(physicalLength(next.slot));
         tuneFor(hopFreq(next.hop), false);
-        Radio.RXnb();
-        armRx(next.slot, next.hop, boundaryUs + slotUs, 0);
+        if (Radio.RXnb()) armRx(next.slot, next.hop, boundaryUs + slotUs, 0);
     }
 }
 
@@ -384,11 +379,10 @@ static bool ICACHE_RAM_ATTR emlRxDone(SX12xxDriverCommon::rx_status const status
         ++macStats.rx_irq_errors;
         return false;
     }
-    if (macSuspended || !armed.valid || armed.taken || txActive)
+    if (macSuspended || txActive || !armed.accepts(rxUs, slotUs))
         return false;
-    // One frame per armed slot; the rendezvous search accepts every candidate
-    if (!(armed.flags & EML_DESC_SEARCH))
-        armed.taken = true;
+    // A corrupt/foreign candidate must not consume this slot. Foreground closes
+    // the gate only after CRC, session and freshness validation, keeping ISR work bounded.
     // LoRa: packet RSSI register; FSK: RSSI sampled by the driver at PayloadReady
     const int8_t rssi = Radio.GetLastPacketRSSI(SX12XX_Radio_1);
     uint8_t flags = armed.flags;
@@ -550,10 +544,10 @@ static void enterSearch(uint32_t now, bool countLoss)
     EML_CRITICAL_ENTER();
     macMode = MAC_SEARCH;
     txActive = false;
+    armed.valid = false;
     Radio.SetFrequencyReg(syncFreq, SX12XX_Radio_All, false);
     Radio.SetPacketLength(kFrameSize);
-    Radio.RXnb();
-    armRx(slotClock.slot, 0, 0, EML_DESC_SEARCH);
+    if (Radio.RXnb()) armRx(slotClock.slot, 0, 0, EML_DESC_SEARCH);
     EML_CRITICAL_EXIT();
     prepSlot = peerProcessedSlot = 0xFFFFFFFFUL;
     if (countLoss)
@@ -689,6 +683,9 @@ static void handleRx(const EmlRadioDescriptor_s &d, uint32_t now)
     }
     if (result != EML_RX_REJECTED && result != EML_RX_STALE)
     {
+        EML_CRITICAL_ENTER();
+        armed.validated(d.context);
+        EML_CRITICAL_EXIT();
         diag.last_valid_offset_us = (int32_t)(d.rx_us - d.slot_start_us);
         // Only session/configuration/freshness-validated frames supervise the link.
         lastValidMs = millis();

@@ -58,7 +58,8 @@ constexpr uint32_t sx127xFskActualFdev(uint32_t fdevHz)
 inline bool sx127xFskBwReg(uint32_t bwHz, uint8_t *reg)
 {
     static const uint8_t mantissa[3] = {16, 20, 24};
-    for (uint8_t exp = 0; exp < 8; exp++)
+    // Table 40: exponent 0 is reserved, even though the formula gives a value.
+    for (uint8_t exp = 1; exp < 8; exp++)
     {
         for (uint8_t m = 0; m < 3; m++)
         {

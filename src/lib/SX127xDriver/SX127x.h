@@ -47,7 +47,7 @@ public:
     // TX/RX entered from FSTX/FSRX before PllLock (waited), or no lock within the bound
     volatile uint32_t FskPllWaits = 0, FskPllTimeouts = 0;
     volatile int32_t FskLastAfcHz = 0; // AFC correction latched at PayloadReady
-    void FskWaitPllLock(SX12XX_Radio_Number_t radioNumber);
+    bool FskWaitPllLock(SX12XX_Radio_Number_t radioNumber);
 #endif
     void SetMode(SX127x_RadioOPmodes mode, SX12XX_Radio_Number_t radioNumber);
     void SetTxIdleMode() { SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All); } // set Idle mode used when switching from RX to TX
@@ -103,9 +103,10 @@ public:
     void CheckForSecondPacket();
 
     ////////////Non-blocking TX related Functions/////////////////
-    void TXnb(uint8_t * data, bool sendGeminiBuffer, uint8_t * dataGemini, SX12XX_Radio_Number_t radioNumber);
+    // False means no transmission started (e.g. fast FSK synthesizer timeout).
+    bool TXnb(uint8_t * data, bool sendGeminiBuffer, uint8_t * dataGemini, SX12XX_Radio_Number_t radioNumber);
     /////////////Non-blocking RX related Functions///////////////
-    void RXnb();
+    bool RXnb();
 
 private:
     // constant used for no power change pending

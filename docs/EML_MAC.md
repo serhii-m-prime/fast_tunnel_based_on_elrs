@@ -91,13 +91,14 @@ ToA для кожної довжини 1–64 перевіряється в `tes
 
 | Подія | Контекст | Дія |
 | --- | --- | --- |
-| Межа власного слота | timer ISR (IRAM) | забрати з TX mailbox найновіший дескриптор саме цього слота **і** поточної generation, частота hop, `TXnb`, ticket у `sentRing`; без кадра coordinator вмикає RX |
+| Межа власного слота | timer ISR (IRAM) | забрати з TX mailbox найновіший дескриптор саме цього слота **і** поточної generation, частота hop, `TXnb`; ticket у `sentRing` лише після успішного старту TX; без кадра coordinator вмикає RX |
 | Межа слота peer | timer ISR | обидві ролі: частота hop, відома фізична довжина, RX, arm `{generation, slot, hop, start_us}` або уточнення вже озброєного прийому |
 | TX done | DIO ISR | обидві ролі: якщо наступний слот належить peer, завчасно поставити його hop/довжину, RX та arm; перед наступним власним слотом лишитися в Standby |
-| RX done | DIO ISR | один кадр на armed слот (пошук приймає всі), копія ≤64 B у RX mailbox із контекстом, `rx_us`, `slot_start_us` |
+| RX done | DIO ISR | кандидати лише в часових межах armed слота (пошук без часової прив'язки), копія ≤64 B у bounded RX mailbox із контекстом, `rx_us`, `slot_start_us`; без CRC в ISR |
 | `emlBridgeLoop()` | foreground | 1) усі `sent()` з `sentRing`; 2) RX mailbox → `receive()` / захоплення / фаза; 3) `tick()`, нагляд за lock; 4) `prepare()` наступного власного слота; 5) `connectionState` |
 
 - Generation стампується **при arm** (`macGeneration` = `transport.generation()` після кожного виклику транспорту); ISR не передає кадри з іншою generation або для іншого слота.
+- Ранній RX після TX done не приймає кадри, що завершилися до початку наступного слота; кінець вікна — його наступна межа. Віднімання `micros()` підтримує wrap. Лише успішна перевірка CRC, сесії та freshness у foreground закриває вікно (`taken`): битий або чужий кадр не забирає можливість прийняти валідний. Закриття виконується в критичній секції, лише якщо generation/slot/hop дескриптора досі збігаються з armed-контекстом.
 - Номер слота публікується через seqlock **після** TX-звіту, тому foreground не побачить новий слот без його `sent()`.
 - Кадр готується двічі: «рано» (одразу після власної межі, зі старим ACK — на випадок утраченого кадра peer) і «пізно» (після обробки кадра peer попереднього слота). Готування й push виконуються, лише якщо до межі лишилося більше `EML_PREP_MARGIN_US` (400 мкс), тож ISR не зустрічає напівготового стану. Якщо ISR усе ж передав ранній кадр, якого transport уже не визнає (`sent()` → false), ACK для нього ігнорується й дані повторюються — безпечна деградація, яку покриває симуляція.
 - Під час `config.Commit()` (`emlBridgeSuspend`) ISR лише рахує слоти, без SPI.
@@ -125,13 +126,28 @@ ToA для кожної довжини 1–64 перевіряється в `tes
 
 ## 10. FSK/GFSK і вибір PHY (P5.1–P5.5)
 
-Підтримка FSK вмикається `SX127X_FSK_SUPPORT` (є в обох Bridge-оточеннях); без нього драйвер SX127x не змінюється. Регістрова арифметика — у [`SX127xFsk.h`](../src/lib/SX127xDriver/SX127xFsk.h), профілі й вибір PHY — у `eml_mac.h`.
+Підтримка FSK вмикається `SX127X_FSK_SUPPORT` (є в обох Bridge-оточеннях); без нього FSK-гілки не включаються. Регістрова арифметика — у [`SX127xFsk.h`](../src/lib/SX127xDriver/SX127xFsk.h), профілі й вибір PHY — у `eml_mac.h`.
 
 ### 10.1. Драйвер (P5.1, P5.3)
 
 `SX127xDriver::ConfigFsk()` переводить модем через Sleep (біт LongRangeMode змінюється лише в Sleep), записує bitrate/frac, Fdev, shaping + PA ramp 40 мкс, RxBw = AfcBw, RxConfig (AFC і AGC на кожному виявленні preamble), preamble 10 B, детектор preamble 2 B, sync word 4 B з UID, fixed-length packet mode, whitening, DIO0, частоту sync channel і запускає калібрування Image/RSSI на робочому діапазоні (з POR воно виконане лише на 434 МГц; таймаут 20 мс). `Config()` повертає LoRa: модем знову через Sleep, кеш SF/BW/CR/preamble скидається, щоб усі LoRa-регістри (зокрема BW500 errata) записалися повторно, а `0x27/0x33/0x3B`, на які FSK-сторінка записала SyncConfig/NodeAdrs/ImageCal, повертаються до LoRa-значень за замовчуванням (PPM 0, InvertIQ 0x27, InvertIQ2 0x1D).
 
 Адреси 0x0D–0x3F у FSK мають інший зміст, тож LoRa-шляхи драйвера в FSK не виконуються: TX без `FifoAddrPtr` (FIFO очищається записом FifoOverrun, заповнюється в Standby, `TxStartCondition = FifoNotEmpty`), окремий ISR, а `GetIrqFlags/ClearIrqFlags/SetPPMoffsetReg/GetFrequencyError` у FSK нічого не роблять.
+
+Виправлення ревю 2026-10-19: для 250 кГц SSB `RegRxBw=RegAfcBw=0x01`.
+Старші біти цих регістрів SX1276 зарезервовані; поля DCC від SX1231 сюди не
+переносяться. Exponent=0 також зарезервований (Table 40). Початковий
+`RegLna=0x23` задає G1 та HF boost перед запуском AGC; gain=000 не використовується.
+Реальні записи packet engine винесено в `SX127xFskConfig.h` і перевірено native
+HAL-моделлю проти окремого регістрового вектора.
+
+При fast turnaround очікуються **обидва** `ModeReady` та `PllLock`; `0xFF` від SPI
+не приймається як успіх. Дедлайн — 250 мкс, із підтримкою wrap `micros()`.
+При таймауті драйвер повертає Standby, вимикає RFAMP і повертає `false` з
+`TXnb/RXnb`: MAC не публікує TX ticket і не arm-ить невдалий RX. Дані залишаються
+для повторної спроби. Ліміт очікування входить у збережений reserve turnaround
+500 мкс; ToA, preamble та slot interval не змінені. Фактичні затримки й результат
+FSK-парування залишаються стендовою перевіркою P5.6/P9.1.
 
 | Подія DIO0 (RegDioMapping1 = 0) | Обробка |
 | --- | --- |

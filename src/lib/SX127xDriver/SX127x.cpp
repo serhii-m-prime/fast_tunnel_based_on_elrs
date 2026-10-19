@@ -2,6 +2,7 @@
 #include "logging.h"
 #include "RFAMP_hal.h"
 #include "SX127xPll.h"
+#include "SX127xFskConfig.h"
 
 SX127xHal hal;
 RFAMP_hal RFAMP;
@@ -243,7 +244,7 @@ void SX127xDriver::ConfigLoraDefaults()
   hal.writeRegister(SX127X_REG_FIFO_TX_BASE_ADDR, SX127X_FIFO_TX_BASE_ADDR_MAX, SX12XX_Radio_All);
   hal.writeRegister(SX127X_REG_FIFO_RX_BASE_ADDR, SX127X_FIFO_RX_BASE_ADDR_MAX, SX12XX_Radio_All);
   hal.writeRegisterBits(SX127X_REG_DIO_MAPPING_1, SX127X_DIO0_RXTX_DONE, SX127X_DIO0_MASK, SX12XX_Radio_All); //undocumented "hack", looking at Table 18 from datasheet SX127X_REG_DIO_MAPPING_1 = 11 appears to be unspported by infact it generates an intterupt on both RXdone and TXdone, this saves switching modes.
-  hal.writeRegister(SX127X_REG_LNA, SX127X_LNA_BOOST_ON, SX12XX_Radio_All);
+  hal.writeRegister(SX127X_REG_LNA, SX127X_LNA_GAIN_1 | SX127X_LNA_BOOST_ON, SX12XX_Radio_All);
   hal.writeRegister(SX1278_REG_MODEM_CONFIG_3, SX1278_AGC_AUTO_ON | SX1278_LOW_DATA_RATE_OPT_OFF, SX12XX_Radio_All);
   hal.writeRegisterBits(SX127X_REG_OCP, SX127X_OCP_ON | SX127X_OCP_150MA, SX127X_OCP_MASK, SX12XX_Radio_All); //150ma max current
   SetPreambleLength(SX127X_PREAMBLE_LENGTH_LSB);
@@ -516,7 +517,7 @@ void ICACHE_RAM_ATTR SX127xDriver::TXnbISR()
   TXdoneCallback();
 }
 
-void ICACHE_RAM_ATTR SX127xDriver::TXnb(uint8_t * data, bool sendGeminiBuffer, uint8_t * dataGemini, SX12XX_Radio_Number_t radioNumber)
+bool ICACHE_RAM_ATTR SX127xDriver::TXnb(uint8_t * data, bool sendGeminiBuffer, uint8_t * dataGemini, SX12XX_Radio_Number_t radioNumber)
 {
   // if (currOpmode == SX127x_OPMODE_TX)
   // {
@@ -533,7 +534,7 @@ void ICACHE_RAM_ATTR SX127xDriver::TXnb(uint8_t * data, bool sendGeminiBuffer, u
 
   if (radioNumber == SX12XX_Radio_NONE)
   {
-      return;
+      return false;
   }
 
 #if defined(SX127X_FSK_SUPPORT)
@@ -542,11 +543,12 @@ void ICACHE_RAM_ATTR SX127xDriver::TXnb(uint8_t * data, bool sendGeminiBuffer, u
     // FSK has no FIFO pointers (0x0D is RegRxConfig): clear and fill the FIFO
     // in Standby or FSTX, then start TX. Gemini is not used.
     hal.writeRegister(SX127X_FSK_REG_IRQ_FLAGS2, SX127X_FSK_IRQ2_FIFO_OVERRUN, radioNumber);
-    RFAMP.TXenable(radioNumber);
+    RFAMP.TXenable(radioNumber); // retain FEM settling time while the FIFO is filled
     hal.writeRegister(SX127X_REG_FIFO, data, PayloadLength, radioNumber);
-    FskWaitPllLock(radioNumber == SX12XX_Radio_All ? SX12XX_Radio_1 : radioNumber);
+    if (!FskWaitPllLock(radioNumber == SX12XX_Radio_All ? SX12XX_Radio_1 : radioNumber))
+      return false;
     SetMode(SX127x_OPMODE_TX, radioNumber);
-    return;
+    return true;
   }
 #endif
 
@@ -574,6 +576,7 @@ void ICACHE_RAM_ATTR SX127xDriver::TXnb(uint8_t * data, bool sendGeminiBuffer, u
   }
 
   SetMode(SX127x_OPMODE_TX, radioNumber);
+  return true;
 }
 
 ///////////////////////////////////RX Functions Non-Blocking///////////////////////////////////////////
@@ -588,32 +591,36 @@ bool ICACHE_RAM_ATTR SX127xDriver::RXnbISR(SX12XX_Radio_Number_t radioNumber)
 
 #if defined(SX127X_FSK_SUPPORT)
 // From FSTX/FSRX the FSK TX/RX states assume a locked synthesizer. After a hop of up
-// to ~60 MHz, wait (bounded, ~64 SPI reads) so the carrier does not settle inside the
+// to ~60 MHz, wait (bounded in microseconds) so the carrier does not settle inside the
 // packet. LoRa tolerates the residual offset; GFSK showed isolated bit errors.
-void ICACHE_RAM_ATTR SX127xDriver::FskWaitPllLock(SX12XX_Radio_Number_t radioNumber)
+bool ICACHE_RAM_ATTR SX127xDriver::FskWaitPllLock(SX12XX_Radio_Number_t radioNumber)
 {
   if (ModFSKorLoRa != SX127x_OPMODE_FSK_OOK ||
       (currOpmode != SX127x_OPMODE_FSTX && currOpmode != SX127x_OPMODE_FSRX))
-    return;
-  for (uint8_t i = 0; i < 64; ++i)
-  {
-    if (hal.readRegister(SX127X_FSK_REG_IRQ_FLAGS1, radioNumber) & SX127X_FSK_IRQ1_PLL_LOCK)
-    {
-      if (i) ++FskPllWaits;
-      return;
-    }
-  }
+    return true;
+  uint16_t reads = 0;
+  auto flags = [&]() { ++reads; return hal.readRegister(SX127X_FSK_REG_IRQ_FLAGS1, radioNumber); };
+  auto clock = []() { return (uint32_t)micros(); };
+  const bool ready = sx127xWaitPllReady(flags, clock, SX127X_FSK_PLL_TIMEOUT_US);
+  if (reads > 1) ++FskPllWaits;
+  if (ready) return true;
   ++FskPllTimeouts;
+  // Do not transmit with an unlocked carrier, or arm a receive window that
+  // never opened. The MAC retries on a subsequent slot without a false TX ticket.
+  SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All);
+  RFAMP.TXRXdisable();
+  return false;
 }
 #endif
 
-void ICACHE_RAM_ATTR SX127xDriver::RXnb()
+bool ICACHE_RAM_ATTR SX127xDriver::RXnb()
 {
 #if defined(SX127X_FSK_SUPPORT)
-  FskWaitPllLock(SX12XX_Radio_1);
+  if (!FskWaitPllLock(SX12XX_Radio_1)) return false;
 #endif
   RFAMP.RXenable();
   SetMode(SX127x_OPMODE_RXCONTINUOUS, SX12XX_Radio_All);
+  return true;
 }
 
 void ICACHE_RAM_ATTR SX127xDriver::CheckForSecondPacket()
@@ -1007,41 +1014,9 @@ bool SX127xDriver::ConfigFsk(const SX127xFskParams_s &params, uint32_t freq, uin
   InvalidateLoraCache();
   SetMode(SX127x_OPMODE_STANDBY, SX12XX_Radio_All);
 
-  const SX127xFskBitrateReg_s br = sx127xFskBitrateReg(params.bitrate);
-  hal.writeRegister(SX127X_FSK_REG_BITRATE_MSB, (uint8_t)(br.reg >> 8), SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_BITRATE_LSB, (uint8_t)br.reg, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_BITRATE_FRAC, br.frac, SX12XX_Radio_All);
-  const uint16_t fdev = sx127xFskFdevReg(params.fdev_hz);
-  hal.writeRegister(SX127X_FSK_REG_FDEV_MSB, (uint8_t)((fdev >> 8) & 0x3F), SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_FDEV_LSB, (uint8_t)fdev, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_PA_RAMP, params.shaping | SX127X_FSK_PA_RAMP_40_US, SX12XX_Radio_All);
   hal.writeRegisterBits(SX127X_REG_OCP, SX127X_OCP_ON | SX127X_OCP_150MA, SX127X_OCP_MASK, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_REG_LNA, SX127X_LNA_BOOST_ON, SX12XX_Radio_All);
-
-  // AFC + AGC on every preamble detection; AFC filter as wide as the channel filter
-  fskRxConfig = SX127X_FSK_AFC_AUTO_ON | SX127X_FSK_AGC_AUTO_ON | SX127X_FSK_RX_TRIGGER_PREAMBLE;
-  hal.writeRegister(SX127X_FSK_REG_RX_CONFIG, fskRxConfig, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_RSSI_CONFIG, SX127X_FSK_RSSI_SMOOTHING_32, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_RX_BW, SX127X_FSK_RXBW_DCC_4_PERCENT | bwReg, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_AFC_BW, SX127X_FSK_AFCBW_DCC_DEFAULT | bwReg, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_AFC_FEI, SX127X_FSK_AFC_AUTO_CLEAR_ON, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_PREAMBLE_DETECT, SX127X_FSK_PREAMBLE_DETECT_2B, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_PREAMBLE_MSB, 0, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_PREAMBLE_LSB, params.preamble_bytes, SX12XX_Radio_All);
-
-  // Fixed length, whitening, no address and no hardware CRC (EML CRC16): the FIFO holds
-  // exactly the N payload bytes
-  hal.writeRegister(SX127X_FSK_REG_SYNC_CONFIG, SX127X_FSK_AUTO_RESTART_RX | SX127X_FSK_SYNC_ON | (uint8_t)(params.sync_size - 1U), SX12XX_Radio_All);
-  WORD_ALIGNED_ATTR uint8_t sync[8];
-  for (uint8_t i = 0; i < params.sync_size; i++)
-    sync[i] = params.sync[i];
-  hal.writeRegister(SX127X_FSK_REG_SYNC_VALUE1, sync, params.sync_size, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_PACKET_CONFIG1, SX127X_FSK_PACKET_FIXED | SX127X_FSK_DCFREE_WHITENING, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_PACKET_CONFIG2, SX127X_FSK_DATA_MODE_PACKET, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_PAYLOAD_LENGTH, payloadLength, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_FIFO_THRESH, SX127X_FSK_TX_START_FIFO_NOT_EMPTY | 0x0F, SX12XX_Radio_All);
-  hal.writeRegister(SX127X_FSK_REG_SEQ_CONFIG1, 0x00, SX12XX_Radio_All); // LoRa errata value lands here
-  hal.writeRegister(SX127X_FSK_REG_DIO_MAPPING1, SX127X_FSK_DIO0_PAYLOAD_PACKET, SX12XX_Radio_All);
+  fskRxConfig = SX127X_FSK_RX_CONFIG_DEFAULT;
+  if (!sx127xFskConfigurePacketEngine(hal, params, payloadLength, (uint8_t)SX12XX_Radio_All)) return false;
 
   SetFrequencyReg(freq, SX12XX_Radio_All);
 
