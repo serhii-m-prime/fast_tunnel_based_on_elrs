@@ -12,6 +12,7 @@
 #include "eml_power.h"
 #include "eml_qos.h"
 #include "eml_role.h"
+#include "eml_mavlink_out.h"
 #include "POWERMGNT.h"
 #include "options.h"
 #if defined(PLATFORM_ESP32)
@@ -131,6 +132,12 @@ static uint8_t missedAckCount = 0, watchedSequence = 0;
 static bool wasActive = false;
 static EmlRole_e runtimeRole = kDefaultRole;
 static EmlRoleElection roleElection;
+// Local-UART self-telemetry (MAVLink2 traffic mode only)
+static EmlMavlinkBoundary egressBoundary;
+static uint8_t telemetryFrame[3 * EML_MAV_FRAME_MAX];
+static size_t telemetryLength = 0;
+static uint32_t telemetryDueMs = 0;
+static uint8_t telemetrySeq = 0;
 static uint32_t lastHelloConfiguration = 0; // diagnostics: configuration_id of the last HELLO heard
 static EmlBridgeDiag_s diag = {};            // bench diagnostics, foreground only
 static uint32_t qosGeneration = 0;
@@ -386,11 +393,20 @@ static bool ICACHE_RAM_ATTR emlRxDone(SX12xxDriverCommon::rx_status const status
     const int8_t rssi = Radio.GetLastPacketRSSI(SX12XX_Radio_1);
     uint8_t flags = armed.flags;
     int8_t snr = 0;
+    int32_t freqError;
     if (!Radio.IsFsk())
     {
         snr = Radio.GetLastPacketSNRRaw(SX12XX_Radio_1) / RADIO_SNR_SCALE;
         flags |= EML_DESC_HAS_SNR;
+        freqError = Radio.GetFrequencyError();
     }
+    else
+        freqError = Radio.FskLastAfcHz;
+    // Bench diagnostics: peer carrier offset (LoRa FEI / FSK AFC), Hz
+    if (!macStats.freq_error_count || freqError < macStats.freq_error_min) macStats.freq_error_min = freqError;
+    if (!macStats.freq_error_count || freqError > macStats.freq_error_max) macStats.freq_error_max = freqError;
+    macStats.freq_error_last = freqError;
+    ++macStats.freq_error_count;
     if (rxMailbox.push(Radio.RXdataBuffer, armed.length, armed.context, nullptr, rxUs, armed.start_us, flags, rssi, snr))
         ++macStats.rx_frames;
     else
@@ -427,6 +443,7 @@ static void publishGeneration()
     {
         qosGeneration = macGeneration;
         qosIngress.clear();
+        egressBoundary.reset(); // a new session starts a new output stream
         qosPumpedSlot = 0xFFFFFFFFUL;
     }
     if (tddGeneration != macGeneration)
@@ -1112,9 +1129,44 @@ void emlBridgeReadSerial(Stream &port)
     emlReadSerial(port, inputUartAdapter, transport.active(), uartStats);
 }
 
+// RADIO_STATUS (SiK units) + EML_LQ / EML_RLQ, as one block of whole frames.
+// rssi/remrssi: local/peer RX level; noise: level - SNR (LoRa only, else unknown);
+// txbuf: free % of the local backlog; rxerrors: rejected frames; fixed: ARQ retries.
+static void buildTelemetry(uint32_t nowMs)
+{
+    const int16_t rssi = (int16_t)(rssiAvgX16 / 16);
+    EmlRadioStatus_s s;
+    s.rssi = rssiAvailable ? emlMavSikLevel(rssi) : EML_MAV_UNKNOWN;
+    s.remrssi = peerLinkValid && peerLink.rssi > -127 ? emlMavSikLevel(peerLink.rssi) : EML_MAV_UNKNOWN;
+    s.noise = rssiAvailable && snrAvailable ? emlMavSikLevel((int16_t)(rssi - snrAvgX16 / 16)) : EML_MAV_UNKNOWN;
+    s.remnoise = peerLinkValid && peerLink.snr_valid && peerLink.rssi > -127 ?
+        emlMavSikLevel((int16_t)(peerLink.rssi - peerLink.snr)) : EML_MAV_UNKNOWN;
+    const size_t capacity = 512U + AP_MAX_BUF_LEN, backlog = txBacklog();
+    s.txbuf = (uint8_t)(backlog >= capacity ? 0U : 100U - backlog * 100U / capacity);
+    s.rxerrors = (uint16_t)transport.stats().invalid;
+    s.fixed = (uint16_t)transport.stats().retransmitted;
+    size_t n = emlMavRadioStatus(s, telemetrySeq++, telemetryFrame);
+    const int32_t lq = transport.active() && linkQuality.samples() ? linkQuality.lq() : 0;
+    n += emlMavNamedValueInt(nowMs, "EML_LQ", lq, telemetrySeq++, telemetryFrame + n);
+    n += emlMavNamedValueInt(nowMs, "EML_RLQ", transport.active() && peerLinkValid ? peerLink.lq : 0, telemetrySeq++,
+                             telemetryFrame + n);
+    telemetryLength = n;
+}
+
 void emlBridgeDrainSerial(Stream &port, uint32_t maxBytes)
 {
-    emlDrainSerial(port, outputUartAdapter, uartStats, maxBytes);
+    if (!firmwareOptions.bridge_telemetry_ms || firmwareOptions.bridge_traffic_mode != EML_OPTION_TRAFFIC_MAVLINK2)
+    {
+        emlDrainSerial(port, outputUartAdapter, uartStats, maxBytes);
+        return;
+    }
+    const uint32_t now = millis();
+    if (!telemetryLength && (int32_t)(now - telemetryDueMs) >= 0)
+    {
+        buildTelemetry(now);
+        telemetryDueMs = now + firmwareOptions.bridge_telemetry_ms;
+    }
+    emlDrainSerialTelemetry(port, outputUartAdapter, uartStats, egressBoundary, telemetryFrame, &telemetryLength, now, maxBytes);
 }
 
 bool emlBridgeActive() { return transport.active(); }

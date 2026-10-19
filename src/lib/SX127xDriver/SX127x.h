@@ -46,6 +46,7 @@ public:
     volatile uint32_t FskFifoOverruns = 0;
     // TX/RX entered from FSTX/FSRX before PllLock (waited), or no lock within the bound
     volatile uint32_t FskPllWaits = 0, FskPllTimeouts = 0;
+    volatile int32_t FskLastAfcHz = 0; // AFC correction latched at PayloadReady
     void FskWaitPllLock(SX12XX_Radio_Number_t radioNumber);
 #endif
     void SetMode(SX127x_RadioOPmodes mode, SX12XX_Radio_Number_t radioNumber);

@@ -96,6 +96,7 @@ void saveOptions(Stream &stream, bool customised)
     doc["bridge-power"] = firmwareOptions.bridge_power;
     doc["bridge-dynamic-power"] = firmwareOptions.bridge_dynamic_power;
     doc["bridge-fan-threshold"] = firmwareOptions.bridge_fan_threshold;
+    doc["bridge-telemetry-ms"] = firmwareOptions.bridge_telemetry_ms;
 #endif
     doc["is-airport"] = firmwareOptions.is_airport;
     doc["domain"] = firmwareOptions.domain;
@@ -264,7 +265,15 @@ static void options_LoadFromFlashOrFile(EspFlashStream &strmFlash)
 #endif
     if (firmwareOptions.bridge_role > EML_OPTION_ROLE_AUTO)
         firmwareOptions.bridge_role = EML_OPTION_ROLE_MASTER;
-    firmwareOptions.bridge_traffic_mode = doc["bridge-traffic-mode"] | EML_OPTION_TRAFFIC_RAW;
+#if !defined(EML_DEFAULT_TRAFFIC)
+#define EML_DEFAULT_TRAFFIC EML_OPTION_TRAFFIC_RAW
+#endif
+#if !defined(EML_DEFAULT_TELEMETRY_MS)
+#define EML_DEFAULT_TELEMETRY_MS 0U
+#endif
+    firmwareOptions.bridge_telemetry_ms = doc["bridge-telemetry-ms"] | (uint16_t)EML_DEFAULT_TELEMETRY_MS;
+    if (!isSupportedBridgeTelemetry(firmwareOptions.bridge_telemetry_ms)) firmwareOptions.bridge_telemetry_ms = 0;
+    firmwareOptions.bridge_traffic_mode = doc["bridge-traffic-mode"] | (uint8_t)EML_DEFAULT_TRAFFIC;
     if (firmwareOptions.bridge_traffic_mode > EML_OPTION_TRAFFIC_SBUS)
         firmwareOptions.bridge_traffic_mode = EML_OPTION_TRAFFIC_RAW;
     firmwareOptions.bridge_power = doc["bridge-power"] | (uint8_t)EML_DEFAULT_POWER;

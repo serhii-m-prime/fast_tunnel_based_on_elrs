@@ -334,6 +334,7 @@ typedef enum
 #define SX127X_FSK_REG_SEQ_CONFIG1      0x36
 #define SX127X_FSK_REG_IMAGE_CAL        0x3B
 #define SX127X_FSK_REG_IRQ_FLAGS1       0x3E
+#define SX127X_FSK_REG_AFC_MSB          0x1B // signed AFC correction in Fstep units
 #define SX127X_FSK_IRQ1_PLL_LOCK        0x10
 #define SX127X_FSK_IRQ1_MODE_READY      0x80
 #define SX127X_FSK_REG_IRQ_FLAGS2       0x3F

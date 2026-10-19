@@ -351,6 +351,8 @@ static void GetBridgeStatus(AsyncWebServerRequest *request)
   link["snr"] = l.snr; link["snr-valid"] = l.snr_valid; link["peer-lq"] = l.peer_lq;
   link["peer-rssi"] = l.peer_rssi; link["fsk-fifo-overruns"] = l.fsk_fifo_overruns;
   link["fsk-pll-waits"] = l.fsk_pll_waits; link["fsk-pll-timeouts"] = l.fsk_pll_timeouts;
+  link["freq-error-hz"] = m.freq_error_last; link["freq-error-min-hz"] = m.freq_error_min;
+  link["freq-error-max-hz"] = m.freq_error_max; link["freq-error-count"] = m.freq_error_count;
   response->setLength();
   request->send(response);
 }
@@ -420,10 +422,11 @@ static void UpdateSettings(AsyncWebServerRequest *request, JsonVariant &json)
   const uint8_t power = json["bridge-power"] | firmwareOptions.bridge_power;
   const uint8_t fan = json["bridge-fan-threshold"] | firmwareOptions.bridge_fan_threshold;
   const uint32_t fanRuntime = json["fan-runtime"] | firmwareOptions.fan_min_runtime;
+  const uint32_t telemetryMs = json["bridge-telemetry-ms"] | (uint32_t)firmwareOptions.bridge_telemetry_ms;
   if (band >= 4 || lq < 10 || lq > 95 || tdd > EML_OPTION_TDD_ADAPTIVE ||
       role > EML_OPTION_ROLE_AUTO || traffic > EML_OPTION_TRAFFIC_SBUS ||
       !isSupportedBridgePower(power) || power > POWERMGNT::getMaxPower() ||
-      !isSupportedBridgePower(fan) || fanRuntime > 600U)
+      !isSupportedBridgePower(fan) || fanRuntime > 600U || !isSupportedBridgeTelemetry(telemetryMs))
   {
     request->send(400, "text/plain", "Invalid EML bridge setting or power exceeds this board's hardware limit.");
     return;
@@ -461,6 +464,7 @@ static void UpdateSettings(AsyncWebServerRequest *request, JsonVariant &json)
   json["bridge-power"] = power;
   json["bridge-fan-threshold"] = fan;
   json["fan-runtime"] = fanRuntime;
+  json["bridge-telemetry-ms"] = telemetryMs;
 #endif
 
   File file = LittleFS.open("/options.json", "w");

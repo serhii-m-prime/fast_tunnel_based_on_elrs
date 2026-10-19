@@ -28,6 +28,11 @@
 #define EML_RX_DONE_US         200U
 // FSK: no LoRa symbol latency; PayloadReady follows the last bit, then ISR + FIFO read
 #define EML_FSK_TX_START_US    200U
+// P5.2 deviation; 62500 (h = 0.5, the validated minimum at 250 kbit/s) leaves +-62.5 kHz
+// of the 250 kHz SSB filter for crystal offset instead of +-35 kHz
+#ifndef EML_FSK_FDEV_HZ
+#define EML_FSK_FDEV_HZ 90000UL
+#endif
 #define EML_FSK_RX_DONE_US     150U
 // Foreground receive() + prepare() + mailbox push before the next own boundary.
 #define EML_PROC_US            600U
@@ -94,10 +99,10 @@ constexpr EmlMacProfile_s EML_PROFILE_LORA32 = {EML_PHY_LORA_500_SF6_CR45, EML_F
 // Fdev + BR/2 = 215 kHz <= 250 kHz filter leaves +-35 kHz for crystal offset before AFC;
 // preamble 10 B (320 us) covers detection (2 B), AFC/AGC and responder alignment.
 constexpr EmlMacProfile_s EML_PROFILE_FSK64 = {EML_PHY_FSK_250, EML_FRAME_SIZE_64, 10, 0, 0, 0,
-                                               250000UL, 90000UL, 250000UL, EML_FSK_SHAPING_BT_1_0, false,
+                                               250000UL, EML_FSK_FDEV_HZ, 250000UL, EML_FSK_SHAPING_BT_1_0, false,
                                                EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 4100UL};
 constexpr EmlMacProfile_s EML_PROFILE_FSK32 = {EML_PHY_FSK_250, EML_FRAME_SIZE_32, 10, 0, 0, 0,
-                                               250000UL, 90000UL, 250000UL, EML_FSK_SHAPING_BT_1_0, false,
+                                               250000UL, EML_FSK_FDEV_HZ, 250000UL, EML_FSK_SHAPING_BT_1_0, false,
                                                EML_FSK_TX_START_US, EML_FSK_RX_DONE_US, 3100UL};
 // P5.7 experiment: 300 kbit/s is the SX1276 FSK maximum. h = 0.5 needs Fdev >= 75 kHz,
 // leaving only +-25 kHz offset margin in the 250 kHz filter. It shares the FSK wire PHY

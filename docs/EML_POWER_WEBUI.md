@@ -61,6 +61,29 @@ size, radio bitrate, time-on-air and slot interval are unchanged from P7; the
 capacity cost is 3.125% of aggregate slots and therefore requires no new ToA
 budget. Negotiated band/TDD control has priority while an exchange is active.
 
+## Live UART telemetry (MAVLink2 mode)
+
+`bridge-telemetry-ms` (WebUI "RADIO_STATUS ms", 200–5000, 0 = off, default off)
+makes each module write its own link view to its local UART, but only when the
+traffic mode is MAVLink2. Raw transport never carries bridge metrics. The frames
+use the SiK radio convention (sysid 51, `MAV_COMP_ID_TELEMETRY_RADIO` 68), so
+Mission Planner and QGroundControl show them unchanged:
+
+| Message | Field | Meaning |
+| --- | --- | --- |
+| `RADIO_STATUS` (109) | `rssi` / `remrssi` | local / peer RX level, SiK units (dBm = value / 1.9 − 127) |
+| | `noise` / `remnoise` | level − SNR (LoRa only; 255 for FSK) |
+| | `txbuf` | free % of the local backlog (QoS + transport) |
+| | `rxerrors` / `fixed` | rejected radio frames / ARQ retransmissions (wrapping) |
+| `NAMED_VALUE_INT` (252) | `EML_LQ` / `EML_RLQ` | local / peer LQ, % |
+
+They are inserted only at MAVLink frame boundaries of the output stream: a
+boundary tracker follows MAVLink1/2 (signed) frames, and while telemetry waits
+each output batch ends at the next boundary. A frame start that stalls for 1 s
+(garbage 0xFD/0xFE) is abandoned. Nothing is sent over the air, so the
+telemetry costs no airtime. The encoder is checked against pymavlink frames
+and the injection against fragmented MAVLink streams in `test_eml_mavlink_out`.
+
 ## Cooling
 
 The ES900TX layout maps the enable-only fan to GPIO17. In every ESP32 Bridge role

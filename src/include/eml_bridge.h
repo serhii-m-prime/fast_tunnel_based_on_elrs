@@ -72,6 +72,8 @@ struct EmlMacStats_s
     uint32_t tx_sync_channel; // frames transmitted on the rendezvous channel
     uint32_t emergency_handover, emergency_timeout, emergency_session_lost;
     uint32_t pump_ok, pump_control, pump_unissued, pump_window, pump_flow, pump_empty, late_missed;
+    int32_t freq_error_last, freq_error_min, freq_error_max;
+    uint32_t freq_error_count;
 };
 const EmlMacStats_s &emlBridgeMacStats();
 const EmlTddStats_s &emlBridgeTddStats();

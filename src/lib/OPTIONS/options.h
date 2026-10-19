@@ -53,6 +53,7 @@ typedef struct _options {
     uint8_t     bridge_traffic_mode;
     uint8_t     bridge_power;
     uint8_t     bridge_fan_threshold;
+    uint16_t    bridge_telemetry_ms;    // MAVLink RADIO_STATUS on the local UART, 0 = off
     bool        bridge_adaptive_fallback;
     bool        bridge_uart_inverted;
     bool        bridge_dynamic_power;
@@ -86,6 +87,12 @@ enum : uint8_t { EML_OPTION_TDD_SYMMETRIC = 0, EML_OPTION_TDD_ADAPTIVE = 1 };
 // Auto listens for a Master at boot and otherwise becomes one (P9.4)
 enum : uint8_t { EML_OPTION_ROLE_MASTER = 0, EML_OPTION_ROLE_SLAVE = 1, EML_OPTION_ROLE_AUTO = 2 };
 enum : uint8_t { EML_OPTION_TRAFFIC_RAW = 0, EML_OPTION_TRAFFIC_MAVLINK2 = 1, EML_OPTION_TRAFFIC_SBUS = 2 };
+
+// 0 = off; telemetry is emitted only in the MAVLink2 traffic mode
+inline bool isSupportedBridgeTelemetry(uint32_t ms)
+{
+    return ms == 0 || (ms >= 200U && ms <= 5000U);
+}
 
 inline bool isSupportedBridgePower(uint8_t power)
 {

@@ -2,6 +2,7 @@
 #define H_EML_UART
 
 #include "eml_transport.h"
+#include "eml_mavlink_out.h"
 
 struct EmlUartStats_s
 {
@@ -48,6 +49,41 @@ size_t emlDrainSerial(Port &port, Queue &queue, EmlUartStats_s &stats, size_t bu
     if (!copied) return 0;
     size_t written = port.write(bytes, count);
     if (written > count) written = count;
+    queue.lock(); queue.skip(written); queue.unlock();
+    stats.written += written;
+    return written;
+}
+
+// Output with bridge self-telemetry (MAVLink2 traffic mode). A pending telemetry frame
+// is written only at a MAVLink frame boundary of the output stream; while it waits,
+// each data batch ends at the next boundary. *telemetryLength becomes 0 once written.
+template <typename Port, typename Queue>
+size_t emlDrainSerialTelemetry(Port &port, Queue &queue, EmlUartStats_s &stats, EmlMavlinkBoundary &boundary,
+                               const uint8_t *telemetry, size_t *telemetryLength, uint32_t nowMs, size_t budget = 64)
+{
+    if (*telemetryLength && boundary.injectable(nowMs))
+    {
+        const int writable = port.availableForWrite();
+        if (writable < (int)*telemetryLength) { ++stats.output_stalls; return 0; }
+        port.write(telemetry, *telemetryLength);
+        *telemetryLength = 0;
+        return 0;
+    }
+    if (!queue.size() || !budget) return 0;
+    const int writable = port.availableForWrite();
+    if (writable <= 0) { ++stats.output_stalls; return 0; }
+    size_t count = queue.size() < budget ? queue.size() : budget;
+    if (count > (size_t)writable) count = (size_t)writable;
+    if (count > 64) count = 64;
+    uint8_t bytes[64];
+    queue.lock();
+    const bool copied = queue.peekBytes(bytes, count);
+    queue.unlock();
+    if (!copied) return 0;
+    if (*telemetryLength) count = boundary.toBoundary(bytes, count);
+    size_t written = port.write(bytes, count);
+    if (written > count) written = count;
+    boundary.feed(bytes, written, nowMs);
     queue.lock(); queue.skip(written); queue.unlock();
     stats.written += written;
     return written;

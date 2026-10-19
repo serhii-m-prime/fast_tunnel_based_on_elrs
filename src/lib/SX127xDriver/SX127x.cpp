@@ -1074,6 +1074,9 @@ void ICACHE_RAM_ATTR SX127xDriver::FskIsrCallback(SX12XX_Radio_Number_t radioNum
   {
     // RSSI is not latched in FSK: sample it before the FIFO read, smoothed over 32 samples
     fskLastRssi = (int8_t)(-(int16_t)(hal.readRegister(SX127X_FSK_REG_RSSI_VALUE, radioNumber) >> 1));
+    WORD_ALIGNED_ATTR uint8_t afc[2];
+    hal.readRegister(SX127X_FSK_REG_AFC_MSB, afc, sizeof(afc), radioNumber);
+    FskLastAfcHz = (int32_t)(int16_t)((afc[0] << 8) | afc[1]) * 61; // Fstep = 61.035 Hz
     hal.readRegister(SX127X_REG_FIFO, RXdataBuffer, PayloadLength, radioNumber);
     RXdoneCallback(SX12XX_RX_OK);
   }
